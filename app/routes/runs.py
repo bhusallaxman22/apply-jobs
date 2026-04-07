@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.agent.runner import execute_run
+from app.config import get_settings
 from app.db import get_session
 from app.models import Job, Profile, Run
 from app.schemas import BulkRunCreate, BulkRunRead, RunApproval, RunCreate, RunRead
@@ -11,6 +15,43 @@ from app.schemas import BulkRunCreate, BulkRunRead, RunApproval, RunCreate, RunR
 router = APIRouter()
 
 ACTIVE_RUN_STATUSES = {"queued", "running", "review"}
+
+
+def _resolve_storage_file(path_value: str | None) -> Path:
+    if not path_value:
+        raise HTTPException(status_code=404, detail="Artifact not available.")
+
+    resolved_path = Path(path_value).expanduser().resolve()
+    storage_root = get_settings().storage_path
+
+    try:
+        resolved_path.relative_to(storage_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Artifact path is outside the storage root.") from exc
+
+    if not resolved_path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact file not found.")
+
+    return resolved_path
+
+
+def _get_review_resume_path(run: Run) -> Path:
+    tailored_resume = (
+        (run.pending_review or {}).get("tailored_resume")
+        or (run.artifacts or {}).get("tailored_resume")
+        or {}
+    )
+    pdf_path = tailored_resume.get("pdf_path")
+    if not pdf_path:
+        raise HTTPException(status_code=404, detail="Tailored resume not available for this run.")
+    return _resolve_storage_file(pdf_path)
+
+
+def _get_review_screenshot_path(run: Run) -> Path:
+    screenshot_path = (run.artifacts or {}).get("latest_screenshot")
+    if not screenshot_path:
+        raise HTTPException(status_code=404, detail="Screenshot not available for this run.")
+    return _resolve_storage_file(screenshot_path)
 
 
 def _serialize_run(run: Run) -> RunRead:
@@ -54,6 +95,24 @@ def get_run(run_id: str, session: Session = Depends(get_session)) -> RunRead:
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
     return _serialize_run(run)
+
+
+@router.get("/{run_id}/review/resume")
+def get_review_resume(run_id: str, session: Session = Depends(get_session)) -> FileResponse:
+    run = session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    resume_path = _get_review_resume_path(run)
+    return FileResponse(resume_path, media_type="application/pdf", filename=resume_path.name)
+
+
+@router.get("/{run_id}/review/screenshot")
+def get_review_screenshot(run_id: str, session: Session = Depends(get_session)) -> FileResponse:
+    run = session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    screenshot_path = _get_review_screenshot_path(run)
+    return FileResponse(screenshot_path, media_type="image/png", filename=screenshot_path.name)
 
 
 def _create_run_record(
@@ -165,12 +224,18 @@ def approve_run(
     run = session.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
+    if run.status != "review":
+        raise HTTPException(status_code=409, detail="Only runs in review status can be approved.")
+
+    job = session.get(Job, run.job_id)
     run.status = "approved"
     run.pending_review = {
         **(run.pending_review or {}),
         "approved": True,
         "notes": payload.notes,
     }
+    if job is not None:
+        job.status = run.status
     session.commit()
     session.refresh(run)
     return _serialize_run(run)
@@ -185,12 +250,18 @@ def reject_run(
     run = session.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
+    if run.status != "review":
+        raise HTTPException(status_code=409, detail="Only runs in review status can be rejected.")
+
+    job = session.get(Job, run.job_id)
     run.status = "rejected"
     run.pending_review = {
         **(run.pending_review or {}),
         "approved": False,
         "notes": payload.notes,
     }
+    if job is not None:
+        job.status = run.status
     session.commit()
     session.refresh(run)
     return _serialize_run(run)

@@ -4,7 +4,9 @@ const state = {
   jobs: [],
   runs: [],
   selectedProfileId: null,
+  selectedReviewRunId: null,
   selectedJobIds: new Set(),
+  reviewNotesDrafts: {},
   filters: {
     titleQuery: "",
     locationQuery: "",
@@ -16,6 +18,10 @@ const state = {
   sort: {
     key: "updated_at",
     direction: "desc",
+  },
+  pagination: {
+    page: 1,
+    pageSize: 25,
   },
 };
 
@@ -53,6 +59,27 @@ const els = {
   jobsSummary: document.getElementById("jobsSummary"),
   jobsTableBody: document.getElementById("jobsTableBody"),
   batchResult: document.getElementById("batchResult"),
+  pageSizeSelect: document.getElementById("pageSizeSelect"),
+  paginationSummary: document.getElementById("paginationSummary"),
+  previousPageButton: document.getElementById("previousPageButton"),
+  nextPageButton: document.getElementById("nextPageButton"),
+  reviewDeskSection: document.getElementById("reviewDeskSection"),
+  reviewSummary: document.getElementById("reviewSummary"),
+  reviewRunSelect: document.getElementById("reviewRunSelect"),
+  reviewEmptyState: document.getElementById("reviewEmptyState"),
+  reviewContent: document.getElementById("reviewContent"),
+  reviewNotesInput: document.getElementById("reviewNotesInput"),
+  approveReviewButton: document.getElementById("approveReviewButton"),
+  rejectReviewButton: document.getElementById("rejectReviewButton"),
+  openReviewJobLink: document.getElementById("openReviewJobLink"),
+  openReviewResumeLink: document.getElementById("openReviewResumeLink"),
+  openReviewScreenshotLink: document.getElementById("openReviewScreenshotLink"),
+  reviewMeta: document.getElementById("reviewMeta"),
+  reviewFields: document.getElementById("reviewFields"),
+  reviewScreenshot: document.getElementById("reviewScreenshot"),
+  reviewScreenshotEmpty: document.getElementById("reviewScreenshotEmpty"),
+  reviewResumeEmpty: document.getElementById("reviewResumeEmpty"),
+  reviewResumeFrame: document.getElementById("reviewResumeFrame"),
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -71,6 +98,7 @@ function bindEvents() {
   });
   els.profileSelect.addEventListener("change", async (event) => {
     state.selectedProfileId = event.target.value || null;
+    state.selectedReviewRunId = null;
     state.selectedJobIds.clear();
     await loadRuns();
     renderDashboard();
@@ -78,32 +106,38 @@ function bindEvents() {
 
   els.titleSearchInput.addEventListener("input", (event) => {
     state.filters.titleQuery = event.target.value.trim().toLowerCase();
+    state.pagination.page = 1;
     renderDashboard();
   });
   els.locationSearchInput.addEventListener("input", (event) => {
     state.filters.locationQuery = event.target.value.trim().toLowerCase();
+    state.pagination.page = 1;
     renderDashboard();
   });
   els.companySearchInput.addEventListener("input", (event) => {
     state.filters.companyQuery = event.target.value.trim().toLowerCase();
+    state.pagination.page = 1;
     renderDashboard();
   });
   els.sourceFilter.addEventListener("change", (event) => {
     state.filters.sourceId = event.target.value;
+    state.pagination.page = 1;
     renderDashboard();
   });
   els.availabilityFilter.addEventListener("change", (event) => {
     state.filters.availability = event.target.value;
+    state.pagination.page = 1;
     renderDashboard();
   });
   els.statusFilter.addEventListener("change", (event) => {
     state.filters.status = event.target.value;
+    state.pagination.page = 1;
     renderDashboard();
   });
 
   els.selectVisibleButton.addEventListener("click", () => {
     const latestRuns = getLatestRunMap();
-    for (const job of getFilteredJobs()) {
+    for (const job of getPaginatedJobs()) {
       if (isRunnableJob(job, latestRuns)) {
         state.selectedJobIds.add(job.id);
       }
@@ -118,13 +152,13 @@ function bindEvents() {
 
   els.selectAllCheckbox.addEventListener("change", (event) => {
     if (event.target.checked) {
-      for (const job of getFilteredJobs()) {
+      for (const job of getPaginatedJobs()) {
         if (isRunnableJob(job)) {
           state.selectedJobIds.add(job.id);
         }
       }
     } else {
-      for (const job of getFilteredJobs()) {
+      for (const job of getPaginatedJobs()) {
         state.selectedJobIds.delete(job.id);
       }
     }
@@ -133,6 +167,36 @@ function bindEvents() {
 
   els.applySelectedButton.addEventListener("click", async () => {
     await queueSelectedJobs([...state.selectedJobIds]);
+  });
+  els.pageSizeSelect.addEventListener("change", (event) => {
+    state.pagination.pageSize = Number(event.target.value) || 25;
+    state.pagination.page = 1;
+    renderDashboard();
+  });
+  els.previousPageButton.addEventListener("click", () => {
+    state.pagination.page = Math.max(1, state.pagination.page - 1);
+    renderDashboard();
+  });
+  els.nextPageButton.addEventListener("click", () => {
+    const totalPages = getPaginationMeta().totalPages;
+    state.pagination.page = Math.min(totalPages, state.pagination.page + 1);
+    renderDashboard();
+  });
+
+  els.reviewRunSelect.addEventListener("change", (event) => {
+    selectReviewRun(event.target.value || null);
+  });
+  els.reviewNotesInput.addEventListener("input", (event) => {
+    if (!state.selectedReviewRunId) {
+      return;
+    }
+    state.reviewNotesDrafts[state.selectedReviewRunId] = event.target.value;
+  });
+  els.approveReviewButton.addEventListener("click", async () => {
+    await submitReviewDecision("approve");
+  });
+  els.rejectReviewButton.addEventListener("click", async () => {
+    await submitReviewDecision("reject");
   });
 
   els.syncAllButton.addEventListener("click", async () => {
@@ -181,6 +245,7 @@ function bindEvents() {
         state.sort.key = key;
         state.sort.direction = key === "updated_at" ? "desc" : "asc";
       }
+      state.pagination.page = 1;
       renderDashboard();
     });
   });
@@ -207,6 +272,7 @@ async function loadDashboardData({ silent = false } = {}) {
     }
 
     state.selectedJobIds = new Set([...state.selectedJobIds].filter((jobId) => jobs.some((job) => job.id === jobId)));
+    clampPagination(getFilteredJobs().length);
     await loadRuns();
     renderDashboard();
     setConnectionState(`Synced ${formatDate(new Date().toISOString(), true)}`);
@@ -220,6 +286,7 @@ async function loadDashboardData({ silent = false } = {}) {
 async function loadRuns() {
   const url = state.selectedProfileId ? `/runs?profile_id=${encodeURIComponent(state.selectedProfileId)}` : "/runs";
   state.runs = await fetchJson(url);
+  syncSelectedReviewRun();
 }
 
 async function queueSelectedJobs(jobIds) {
@@ -253,6 +320,35 @@ async function queueSelectedJobs(jobIds) {
   } catch (error) {
     setBatchMessage(getErrorMessage(error), "error");
     setConnectionState("Queue request failed");
+  }
+}
+
+async function submitReviewDecision(decision) {
+  const selectedRun = getSelectedReviewRun();
+  if (!selectedRun) {
+    setBatchMessage("Choose a review run first.", "warning");
+    return;
+  }
+
+  const notes = els.reviewNotesInput.value.trim();
+  state.reviewNotesDrafts[selectedRun.id] = notes;
+
+  try {
+    setConnectionState(decision === "approve" ? "Approving review…" : "Rejecting review…");
+    await fetchJson(`/runs/${encodeURIComponent(selectedRun.id)}/${decision}`, {
+      method: "POST",
+      body: JSON.stringify({ notes: notes || null }),
+    });
+    await loadRuns();
+    renderDashboard();
+    setBatchMessage(
+      decision === "approve" ? "Review approved." : "Review rejected. You can update the profile and queue again.",
+      decision === "approve" ? "success" : "warning",
+    );
+    setConnectionState(decision === "approve" ? "Review approved" : "Review rejected");
+  } catch (error) {
+    setBatchMessage(getErrorMessage(error), "error");
+    setConnectionState("Review decision failed");
   }
 }
 
@@ -318,12 +414,15 @@ async function syncSource(sourceId, { refreshAfter = true } = {}) {
 }
 
 function renderDashboard() {
+  clampPagination(getFilteredJobs().length);
   renderProfilePanel();
   renderSourceFilter();
   renderSources();
   renderStats();
   renderRuns();
   renderJobs();
+  renderPagination();
+  renderReviewDesk();
   renderSortIndicators();
 }
 
@@ -419,6 +518,7 @@ function renderSources() {
   els.sourceList.querySelectorAll("[data-source-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       state.filters.sourceId = button.dataset.sourceFilter;
+      state.pagination.page = 1;
       els.sourceFilter.value = state.filters.sourceId;
       renderDashboard();
     });
@@ -467,6 +567,10 @@ function renderRuns() {
     .map((run) => {
       const job = jobsById.get(run.job_id);
       const title = job?.title || job?.url || run.job_id;
+      const reviewButton =
+        normalizeStatus(run.status) === "review"
+          ? `<div class="source-card-actions"><button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(run.id)}">Open review</button></div>`
+          : "";
       return `
         <div class="run-card">
           <div class="run-card-header">
@@ -474,29 +578,39 @@ function renderRuns() {
             <span class="badge badge-${escapeHtml(normalizeStatus(run.status))}">${escapeHtml(run.status)}</span>
           </div>
           <p>${escapeHtml(job?.company || "Unknown company")} · ${escapeHtml(formatDate(run.updated_at, true))}</p>
+          ${reviewButton}
         </div>
       `;
     })
     .join("");
+
+  els.runList.querySelectorAll("[data-review-run]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectReviewRun(button.dataset.reviewRun);
+      els.reviewDeskSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
 }
 
 function renderJobs() {
   const filteredJobs = getFilteredJobs();
+  const paginatedJobs = getPaginatedJobs(filteredJobs);
   const latestRuns = getLatestRunMap();
 
-  const selectedVisibleCount = filteredJobs.filter((job) => state.selectedJobIds.has(job.id)).length;
-  const runnableVisibleCount = filteredJobs.filter((job) => isRunnableJob(job, latestRuns)).length;
+  const selectedVisibleCount = paginatedJobs.filter((job) => state.selectedJobIds.has(job.id)).length;
+  const runnableVisibleCount = paginatedJobs.filter((job) => isRunnableJob(job, latestRuns)).length;
   const allVisibleSelected = runnableVisibleCount > 0 && selectedVisibleCount === runnableVisibleCount;
   els.selectAllCheckbox.checked = allVisibleSelected;
   els.selectAllCheckbox.indeterminate = selectedVisibleCount > 0 && !allVisibleSelected;
 
   const profile = getActiveProfile();
   els.applySelectedButton.disabled = !profile || !state.selectedJobIds.size;
-  els.jobsSummary.textContent = `${filteredJobs.length} jobs shown · ${state.selectedJobIds.size} selected · ${
+  const paginationMeta = getPaginationMeta(filteredJobs.length);
+  els.jobsSummary.textContent = `${filteredJobs.length} jobs matched · page ${paginationMeta.page} of ${paginationMeta.totalPages} · ${state.selectedJobIds.size} selected · ${
     profile ? `applying with ${profile.name}` : "choose a resume profile"
   }`;
 
-  if (!filteredJobs.length) {
+  if (!paginatedJobs.length) {
     els.jobsTableBody.innerHTML = `
       <tr>
         <td colspan="8">
@@ -507,7 +621,7 @@ function renderJobs() {
     return;
   }
 
-  els.jobsTableBody.innerHTML = filteredJobs
+  els.jobsTableBody.innerHTML = paginatedJobs
     .map((job) => {
       const latestRun = latestRuns.get(job.id);
       const applyStatus = getApplyStatus(job, latestRuns);
@@ -559,6 +673,11 @@ function renderJobs() {
           <td>
             <div class="stack">
               <button class="button button-secondary small-button" type="button" data-run-job="${escapeHtml(job.id)}" ${disabled}>Queue</button>
+              ${
+                latestRun && applyStatus === "review"
+                  ? `<button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(latestRun.id)}">Review</button>`
+                  : ""
+              }
               <a class="link" href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>
             </div>
           </td>
@@ -584,6 +703,162 @@ function renderJobs() {
       await queueSelectedJobs([button.dataset.runJob]);
     });
   });
+
+  els.jobsTableBody.querySelectorAll("[data-review-run]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectReviewRun(button.dataset.reviewRun);
+      els.reviewDeskSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+}
+
+function renderReviewDesk() {
+  const reviewRuns = getReviewRuns();
+  els.reviewSummary.textContent = reviewRuns.length
+    ? `${reviewRuns.length} run${reviewRuns.length === 1 ? "" : "s"} awaiting review.`
+    : "No review runs pending.";
+
+  if (!reviewRuns.length) {
+    els.reviewRunSelect.innerHTML = `<option value="">No review runs</option>`;
+    els.reviewRunSelect.disabled = true;
+    els.reviewEmptyState.hidden = false;
+    els.reviewContent.hidden = true;
+    els.reviewNotesInput.value = "";
+    els.reviewMeta.innerHTML = "";
+    els.reviewFields.innerHTML = "";
+    els.reviewResumeFrame.src = "about:blank";
+    els.reviewScreenshot.removeAttribute("src");
+    return;
+  }
+
+  const selectedRun = getSelectedReviewRun();
+  const options = reviewRuns
+    .map((run) => {
+      const selected = run.id === selectedRun?.id ? "selected" : "";
+      return `<option value="${escapeHtml(run.id)}" ${selected}>${escapeHtml(formatReviewRunLabel(run))}</option>`;
+    })
+    .join("");
+
+  els.reviewRunSelect.innerHTML = options;
+  els.reviewRunSelect.disabled = false;
+  els.reviewEmptyState.hidden = true;
+  els.reviewContent.hidden = false;
+
+  if (!selectedRun) {
+    return;
+  }
+
+  const job = getJobById(selectedRun.job_id);
+  const pendingReview = selectedRun.pending_review || {};
+  const tailoredResume = pendingReview.tailored_resume || selectedRun.artifacts?.tailored_resume || null;
+  const fields = pendingReview.fields || selectedRun.extracted_fields || [];
+  const notes = state.reviewNotesDrafts[selectedRun.id] ?? pendingReview.notes ?? "";
+  const jobTitle = job?.title || selectedRun.result?.page_title || selectedRun.job_id;
+  const jobCompany = job?.company || selectedRun.result?.company || "Unknown company";
+  const finalUrl = pendingReview.final_url || selectedRun.result?.final_url || job?.url || "";
+  const jobUrl = job?.url || finalUrl || "";
+  const screenshotUrl = hasReviewScreenshot(selectedRun) ? getReviewScreenshotUrl(selectedRun) : "";
+  const resumeUrl = tailoredResume?.pdf_path ? getReviewResumeUrl(selectedRun) : "";
+
+  els.reviewNotesInput.value = notes;
+  els.reviewMeta.innerHTML = `
+    <div class="review-meta-card">
+      <div class="run-card-header">
+        <h3>${escapeHtml(jobTitle)}</h3>
+        <span class="badge badge-review">review</span>
+      </div>
+      <p>${escapeHtml(jobCompany)}</p>
+      <p>${escapeHtml(finalUrl || "Final review URL not available")}</p>
+      <p>Updated ${escapeHtml(formatDate(selectedRun.updated_at, true))}</p>
+    </div>
+  `;
+
+  if (fields.length) {
+    els.reviewFields.innerHTML = fields
+      .map((field) => {
+        const value = field.current_value || field.value || field.profile_path || field.answer_prompt || "No captured value";
+        const detail = [
+          field.field_type ? `Type: ${field.field_type}` : null,
+          field.safe_to_autofill ? "Safe autofill" : "Needs review",
+          field.selector ? `Selector: ${field.selector}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return `
+          <div class="review-field-card">
+            <h4>${escapeHtml(field.label || "Unnamed field")}</h4>
+            <p>${escapeHtml(value)}</p>
+            <p>${escapeHtml(detail)}</p>
+          </div>
+        `;
+      })
+      .join("");
+  } else {
+    els.reviewFields.innerHTML = `<div class="empty-state">No extracted fields were recorded for this run.</div>`;
+  }
+
+  els.openReviewJobLink.hidden = !jobUrl;
+  els.openReviewJobLink.href = jobUrl || "#";
+  els.openReviewJobLink.setAttribute("aria-disabled", jobUrl ? "false" : "true");
+
+  if (resumeUrl) {
+    els.reviewResumeEmpty.hidden = true;
+    els.reviewResumeFrame.hidden = false;
+    els.reviewResumeFrame.src = resumeUrl;
+    els.openReviewResumeLink.hidden = false;
+    els.openReviewResumeLink.href = resumeUrl;
+  } else {
+    els.reviewResumeEmpty.hidden = false;
+    els.reviewResumeFrame.hidden = true;
+    els.reviewResumeFrame.src = "about:blank";
+    els.openReviewResumeLink.hidden = true;
+    els.openReviewResumeLink.href = "#";
+  }
+
+  if (screenshotUrl) {
+    els.reviewScreenshot.hidden = false;
+    els.reviewScreenshotEmpty.hidden = true;
+    els.reviewScreenshot.src = screenshotUrl;
+    els.openReviewScreenshotLink.hidden = false;
+    els.openReviewScreenshotLink.href = screenshotUrl;
+  } else {
+    els.reviewScreenshot.hidden = true;
+    els.reviewScreenshotEmpty.hidden = false;
+    els.reviewScreenshot.removeAttribute("src");
+    els.openReviewScreenshotLink.hidden = true;
+    els.openReviewScreenshotLink.href = "#";
+  }
+}
+
+function renderPagination() {
+  const filteredJobs = getFilteredJobs();
+  const { page, totalPages, startIndex, endIndex, totalItems } = getPaginationMeta(filteredJobs.length);
+  els.pageSizeSelect.value = String(state.pagination.pageSize);
+  els.paginationSummary.textContent = totalItems
+    ? `Showing ${startIndex + 1}-${endIndex} of ${totalItems} · page ${page} of ${totalPages}`
+    : "Showing 0 results";
+  els.previousPageButton.disabled = page <= 1;
+  els.nextPageButton.disabled = page >= totalPages;
+}
+
+function syncSelectedReviewRun() {
+  const reviewRuns = getReviewRuns();
+  if (!reviewRuns.some((run) => run.id === state.selectedReviewRunId)) {
+    state.selectedReviewRunId = reviewRuns[0]?.id ?? null;
+  }
+  if (state.selectedReviewRunId && state.reviewNotesDrafts[state.selectedReviewRunId] === undefined) {
+    const selectedRun = reviewRuns.find((run) => run.id === state.selectedReviewRunId);
+    state.reviewNotesDrafts[state.selectedReviewRunId] = selectedRun?.pending_review?.notes ?? "";
+  }
+}
+
+function selectReviewRun(runId) {
+  state.selectedReviewRunId = runId;
+  if (runId && state.reviewNotesDrafts[runId] === undefined) {
+    const run = state.runs.find((entry) => entry.id === runId);
+    state.reviewNotesDrafts[runId] = run?.pending_review?.notes ?? "";
+  }
+  renderDashboard();
 }
 
 function getFilteredJobs() {
@@ -629,6 +904,11 @@ function getFilteredJobs() {
   return sortJobs(filtered, latestRuns);
 }
 
+function getPaginatedJobs(filteredJobs = getFilteredJobs()) {
+  const { startIndex, endIndex } = getPaginationMeta(filteredJobs.length);
+  return filteredJobs.slice(startIndex, endIndex);
+}
+
 function getLatestRunMap() {
   const sortedRuns = [...state.runs].sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
   const latestByJob = new Map();
@@ -638,6 +918,16 @@ function getLatestRunMap() {
     }
   }
   return latestByJob;
+}
+
+function getReviewRuns() {
+  return [...state.runs]
+    .filter((run) => normalizeStatus(run.status) === "review")
+    .sort((left, right) => new Date(right.updated_at) - new Date(left.updated_at));
+}
+
+function getSelectedReviewRun() {
+  return getReviewRuns().find((run) => run.id === state.selectedReviewRunId) || null;
 }
 
 function getApplyStatus(job, latestRuns) {
@@ -659,6 +949,50 @@ function getSourceLabel(job) {
   }
   const source = state.sources.find((entry) => entry.id === job.source_id);
   return source ? source.name : "Imported source";
+}
+
+function getJobById(jobId) {
+  return state.jobs.find((job) => job.id === jobId) || null;
+}
+
+function formatReviewRunLabel(run) {
+  const job = getJobById(run.job_id);
+  const title = job?.title || run.result?.page_title || run.job_id;
+  const company = job?.company || run.result?.company || "Unknown company";
+  return `${title} · ${company} · ${formatDate(run.updated_at, true)}`;
+}
+
+function getReviewResumeUrl(run) {
+  return `/runs/${encodeURIComponent(run.id)}/review/resume?v=${encodeURIComponent(run.updated_at || run.id)}`;
+}
+
+function getReviewScreenshotUrl(run) {
+  return `/runs/${encodeURIComponent(run.id)}/review/screenshot?v=${encodeURIComponent(run.updated_at || run.id)}`;
+}
+
+function hasReviewScreenshot(run) {
+  return Boolean(run.artifacts?.latest_screenshot);
+}
+
+function getPaginationMeta(totalItems = getFilteredJobs().length) {
+  const pageSize = Math.max(1, state.pagination.pageSize);
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const page = Math.min(Math.max(1, state.pagination.page), totalPages);
+  const startIndex = totalItems ? (page - 1) * pageSize : 0;
+  const endIndex = totalItems ? Math.min(startIndex + pageSize, totalItems) : 0;
+  return {
+    page,
+    pageSize,
+    totalPages,
+    totalItems,
+    startIndex,
+    endIndex,
+  };
+}
+
+function clampPagination(totalItems = getFilteredJobs().length) {
+  const { page, totalPages } = getPaginationMeta(totalItems);
+  state.pagination.page = Math.min(page, totalPages);
 }
 
 function sortJobs(jobs, latestRuns) {

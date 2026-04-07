@@ -213,6 +213,88 @@
                 <tbody id="jobsTableBody"></tbody>
               </table>
             </div>
+
+            <div class="table-pagination">
+              <div class="pagination-meta">
+                <label class="field-label" for="pageSizeSelect">Rows per page</label>
+                <select id="pageSizeSelect" class="select pagination-select">
+                  <option value="10">10</option>
+                  <option value="25" selected>25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </div>
+
+              <p id="paginationSummary" class="jobs-summary">Page 1 of 1</p>
+
+              <div class="pagination-actions">
+                <button id="previousPageButton" class="button button-secondary" type="button">Previous</button>
+                <button id="nextPageButton" class="button button-secondary" type="button">Next</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="reviewDeskSection" class="card review-card">
+            <div class="review-header">
+              <div>
+                <p class="panel-kicker">Human Gate</p>
+                <h2>Review Desk</h2>
+                <p id="reviewSummary" class="jobs-summary">No review runs pending.</p>
+              </div>
+              <div class="review-selector">
+                <label class="field-label" for="reviewRunSelect">Review run</label>
+                <select id="reviewRunSelect" class="select"></select>
+              </div>
+            </div>
+
+            <div id="reviewEmptyState" class="empty-state">No jobs are waiting for review for the selected profile.</div>
+
+            <div id="reviewContent" class="review-content" hidden>
+              <div class="review-actions-bar">
+                <div class="review-actions-copy">
+                  <label class="field-label" for="reviewNotesInput">Review notes</label>
+                  <textarea
+                    id="reviewNotesInput"
+                    class="input review-notes"
+                    placeholder="Add optional notes before approving or rejecting this run."
+                  ></textarea>
+                </div>
+                <div class="review-buttons">
+                  <button id="approveReviewButton" class="button button-primary" type="button">Approve</button>
+                  <button id="rejectReviewButton" class="button button-secondary" type="button">Reject</button>
+                  <a id="openReviewJobLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open job</a>
+                  <a id="openReviewResumeLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open resume</a>
+                </div>
+              </div>
+
+              <div class="review-grid">
+                <section class="review-panel">
+                  <div id="reviewMeta" class="review-meta"></div>
+                  <h3>Extracted Fields</h3>
+                  <div id="reviewFields" class="review-fields"></div>
+
+                  <div class="review-panel-header">
+                    <h3>Captured Page</h3>
+                    <a id="openReviewScreenshotLink" class="link" href="#" target="_blank" rel="noreferrer">Open screenshot</a>
+                  </div>
+                  <div class="review-screenshot-shell">
+                    <img id="reviewScreenshot" class="review-screenshot" alt="Captured review page screenshot" />
+                    <div id="reviewScreenshotEmpty" class="empty-state">No screenshot was captured for this run.</div>
+                  </div>
+                </section>
+
+                <section class="review-panel">
+                  <div class="review-panel-header">
+                    <div>
+                      <h3>Generated Resume</h3>
+                      <p class="job-meta">This is the tailored PDF generated for the selected job when available.</p>
+                    </div>
+                  </div>
+                  <div id="reviewResumeEmpty" class="empty-state">No tailored resume is stored for this run.</div>
+                  <iframe id="reviewResumeFrame" class="review-resume-frame" title="Tailored resume preview"></iframe>
+                </section>
+              </div>
+            </div>
           </section>
         </main>
       </div>
