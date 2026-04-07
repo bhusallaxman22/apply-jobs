@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Iterable
 
 from app.agent.actions import click_target, fill_field
@@ -11,6 +12,8 @@ from app.models import AnswerEntry
 from app.profile_store import lookup_profile_value
 from app.schemas import PageState
 from app.schemas import AgentDecision, ExtractedField
+
+logger = logging.getLogger(__name__)
 
 
 class GenericAdapter:
@@ -125,6 +128,7 @@ class GenericAdapter:
                             note=generated.note or f"Generated from selected profile resume: {generated.source_path}",
                         ).model_dump()
                     )
+                    logger.info("AI-generated answer filled for field %r.", field.label)
                     continue
                 except AnswerGenerationError as exc:
                     skipped.append(
@@ -135,6 +139,7 @@ class GenericAdapter:
                             note=f"AI answer generation deferred to review: {exc}",
                         ).model_dump()
                     )
+                    logger.warning("AI answer generation deferred for field %r: %s", field.label, exc)
                 except Exception as exc:
                     skipped.append(
                         AgentDecision(
@@ -144,6 +149,7 @@ class GenericAdapter:
                             note=f"AI answer generation failed and was deferred to review: {exc}",
                         ).model_dump()
                     )
+                    logger.exception("AI answer generation failed for field %r.", field.label)
                 continue
 
             skipped.append(

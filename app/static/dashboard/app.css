@@ -529,6 +529,25 @@ body {
   gap: 10px;
 }
 
+.review-questions {
+  display: grid;
+  gap: 12px;
+}
+
+.review-question-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid var(--line);
+}
+
+.review-question-card h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
 .review-field-card {
   padding: 12px 14px;
   border-radius: var(--radius-sm);
@@ -561,9 +580,16 @@ body {
   object-fit: contain;
 }
 
-.review-resume-frame {
+.review-resume-preview {
   width: 100%;
-  min-height: 720px;
+  min-height: 420px;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--mono-font);
+  font-size: 0.82rem;
+  line-height: 1.55;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: #fff;
@@ -693,7 +719,8 @@ body {
 }
 
 .badge-queued,
-.badge-running {
+.badge-running,
+.badge-submitting {
   color: var(--warning);
   background: var(--warning-bg);
 }
@@ -710,6 +737,11 @@ body {
 .badge-closed {
   color: var(--danger);
   background: var(--danger-bg);
+}
+
+.review-warning {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 .empty-state {

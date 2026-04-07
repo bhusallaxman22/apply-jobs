@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.agent.runner import execute_run
+from app.agent.runner import execute_run, submit_approved_run
 from app.config import get_settings
 from app.db import get_session
 from app.models import Job, Profile, Run
 from app.schemas import BulkRunCreate, BulkRunRead, RunApproval, RunCreate, RunRead
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
-ACTIVE_RUN_STATUSES = {"queued", "running", "review"}
+ACTIVE_RUN_STATUSES = {"queued", "running", "review", "submitting"}
 
 
 def _resolve_storage_file(path_value: str | None) -> Path:
@@ -103,7 +105,11 @@ def get_review_resume(run_id: str, session: Session = Depends(get_session)) -> F
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
     resume_path = _get_review_resume_path(run)
-    return FileResponse(resume_path, media_type="application/pdf", filename=resume_path.name)
+    return FileResponse(
+        resume_path,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{resume_path.name}"'},
+    )
 
 
 @router.get("/{run_id}/review/screenshot")
@@ -112,7 +118,11 @@ def get_review_screenshot(run_id: str, session: Session = Depends(get_session)) 
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
     screenshot_path = _get_review_screenshot_path(run)
-    return FileResponse(screenshot_path, media_type="image/png", filename=screenshot_path.name)
+    return FileResponse(
+        screenshot_path,
+        media_type="image/png",
+        headers={"Content-Disposition": f'inline; filename="{screenshot_path.name}"'},
+    )
 
 
 def _create_run_record(
@@ -219,6 +229,7 @@ def create_bulk_runs(
 def approve_run(
     run_id: str,
     payload: RunApproval,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ) -> RunRead:
     run = session.get(Run, run_id)
@@ -228,16 +239,25 @@ def approve_run(
         raise HTTPException(status_code=409, detail="Only runs in review status can be approved.")
 
     job = session.get(Job, run.job_id)
-    run.status = "approved"
+    logger.info(
+        "Approving review run %s for job %s and queueing automatic submission.",
+        run.id,
+        run.job_id,
+    )
+    run.status = "submitting"
     run.pending_review = {
         **(run.pending_review or {}),
         "approved": True,
         "notes": payload.notes,
+        "submission_error": None,
     }
+    run.error_message = None
+    run.finished_at = None
     if job is not None:
         job.status = run.status
     session.commit()
     session.refresh(run)
+    background_tasks.add_task(submit_approved_run, run.id)
     return _serialize_run(run)
 
 
@@ -254,6 +274,7 @@ def reject_run(
         raise HTTPException(status_code=409, detail="Only runs in review status can be rejected.")
 
     job = session.get(Job, run.job_id)
+    logger.info("Rejecting review run %s for job %s.", run.id, run.job_id)
     run.status = "rejected"
     run.pending_review = {
         **(run.pending_review or {}),

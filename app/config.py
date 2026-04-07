@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         return self.storage_path / "traces"
 
     @property
+    def browser_states_path(self) -> Path:
+        return self.storage_path / "browser-states"
+
+    @property
     def html_path(self) -> Path:
         return self.storage_path / "html"
 
@@ -64,6 +68,7 @@ def ensure_storage_dirs() -> None:
         settings.storage_path,
         settings.screenshots_path,
         settings.traces_path,
+        settings.browser_states_path,
         settings.html_path,
         settings.resumes_path,
         settings.resume_variants_path,

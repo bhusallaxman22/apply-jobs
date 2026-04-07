@@ -217,6 +217,7 @@
                   <option value="not-started">Not started</option>
                   <option value="queued">Queued</option>
                   <option value="running">Running</option>
+                  <option value="submitting">Submitting</option>
                   <option value="review">Review</option>
                   <option value="completed">Completed</option>
                   <option value="approved">Approved</option>
@@ -309,7 +310,7 @@
                   ></textarea>
                 </div>
                 <div class="review-buttons">
-                  <button id="approveReviewButton" class="button button-primary" type="button">Approve</button>
+                  <button id="approveReviewButton" class="button button-primary" type="button">Approve &amp; submit</button>
                   <button id="rejectReviewButton" class="button button-secondary" type="button">Reject</button>
                   <a id="openReviewJobLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open job</a>
                   <a id="openReviewResumeLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open resume</a>
@@ -319,6 +320,14 @@
               <div class="review-grid">
                 <section class="review-panel">
                   <div id="reviewMeta" class="review-meta"></div>
+                  <div class="review-panel-header">
+                    <div>
+                      <h3>Questions Needing Answers</h3>
+                      <p class="job-meta">Shown when AI and saved answers did not fill a long-form field.</p>
+                    </div>
+                  </div>
+                  <div id="reviewQuestions" class="review-questions"></div>
+
                   <h3>Extracted Fields</h3>
                   <div id="reviewFields" class="review-fields"></div>
 
@@ -336,11 +345,11 @@
                   <div class="review-panel-header">
                     <div>
                       <h3>Generated Resume</h3>
-                      <p class="job-meta">This is the tailored PDF generated for the selected job when available.</p>
+                      <p class="job-meta">Previewed in-app from the generated variant instead of auto-loading the PDF file.</p>
                     </div>
                   </div>
                   <div id="reviewResumeEmpty" class="empty-state">No tailored resume is stored for this run.</div>
-                  <iframe id="reviewResumeFrame" class="review-resume-frame" title="Tailored resume preview"></iframe>
+                  <pre id="reviewResumePreview" class="review-resume-preview"></pre>
                 </section>
               </div>
             </div>

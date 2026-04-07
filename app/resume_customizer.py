@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from copy import deepcopy
@@ -24,6 +25,9 @@ from app.schemas import ResumeCustomizeRequest, ResumeVariantRead, TailoredResum
 
 class ResumeCustomizationError(RuntimeError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -227,8 +231,11 @@ async def generate_tailored_resume_document(
             ),
             temperature=0.2,
         )
-        return TailoredResumeDocument.model_validate(raw), source_path
+        document = TailoredResumeDocument.model_validate(raw)
+        logger.info("Generated tailored resume document from source %s.", source_path)
+        return document, source_path
     except (LLMError, ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        logger.warning("Falling back to heuristic resume document for source %s: %s", source_path, exc)
         return fallback_resume_document(source_text, job_context), source_path
 
 
@@ -499,7 +506,9 @@ async def create_resume_variant(
         )
         markdown_path.write_text(rendered_markdown, encoding="utf-8")
         review_notes = [f"Used uploaded profile resume as a fallback because tailoring failed: {exc}"]
+        logger.warning("Using uploaded profile resume fallback for profile %s: %s", profile_id, exc)
 
+    logger.info("Created resume variant for profile %s at %s.", profile_id, pdf_path)
     return ResumeVariantRead(
         profile_id=profile_id,
         job_url=job_request.job_url,

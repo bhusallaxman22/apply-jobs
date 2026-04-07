@@ -83,11 +83,12 @@ const els = {
   openReviewResumeLink: document.getElementById("openReviewResumeLink"),
   openReviewScreenshotLink: document.getElementById("openReviewScreenshotLink"),
   reviewMeta: document.getElementById("reviewMeta"),
+  reviewQuestions: document.getElementById("reviewQuestions"),
   reviewFields: document.getElementById("reviewFields"),
   reviewScreenshot: document.getElementById("reviewScreenshot"),
   reviewScreenshotEmpty: document.getElementById("reviewScreenshotEmpty"),
   reviewResumeEmpty: document.getElementById("reviewResumeEmpty"),
-  reviewResumeFrame: document.getElementById("reviewResumeFrame"),
+  reviewResumePreview: document.getElementById("reviewResumePreview"),
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -346,7 +347,7 @@ async function submitReviewDecision(decision) {
   state.reviewNotesDrafts[selectedRun.id] = notes;
 
   try {
-    setConnectionState(decision === "approve" ? "Approving review…" : "Rejecting review…");
+    setConnectionState(decision === "approve" ? "Starting approved submission..." : "Rejecting review...");
     await fetchJson(`/runs/${encodeURIComponent(selectedRun.id)}/${decision}`, {
       method: "POST",
       body: JSON.stringify({ notes: notes || null }),
@@ -354,10 +355,12 @@ async function submitReviewDecision(decision) {
     await loadRuns();
     renderDashboard();
     setBatchMessage(
-      decision === "approve" ? "Review approved." : "Review rejected. You can update the profile and queue again.",
+      decision === "approve"
+        ? "Review approved. Automatic submission started."
+        : "Review rejected. You can update the profile and queue again.",
       decision === "approve" ? "success" : "warning",
     );
-    setConnectionState(decision === "approve" ? "Review approved" : "Review rejected");
+    setConnectionState(decision === "approve" ? "Approved submission queued" : "Review rejected");
   } catch (error) {
     setBatchMessage(getErrorMessage(error), "error");
     setConnectionState("Review decision failed");
@@ -489,6 +492,57 @@ async function deleteAnswerEntry(answerId) {
   } catch (error) {
     setBatchMessage(getErrorMessage(error), "error");
     setConnectionState("Deleting answer failed");
+  }
+}
+
+async function saveReviewQuestionAnswer(prompt, answer, safeToAutofill = true) {
+  const profile = getActiveProfile();
+  if (!profile) {
+    setBatchMessage("Choose a profile before saving answers.", "warning");
+    return;
+  }
+
+  const normalizedPrompt = normalizePrompt(prompt);
+  const existing = (profile.answers || []).find((entry) => normalizePrompt(entry.prompt) === normalizedPrompt);
+  if (existing) {
+    await updateAnswerEntry(existing.id, {
+      prompt,
+      answer,
+      safe_to_autofill: safeToAutofill,
+    });
+    return;
+  }
+
+  await createAnswerEntryFromValues({
+    prompt,
+    answer,
+    safeToAutofill,
+  });
+}
+
+async function createAnswerEntryFromValues({ prompt, answer, safeToAutofill }) {
+  const profile = getActiveProfile();
+  if (!profile) {
+    setBatchMessage("Choose a profile before adding answer-bank entries.", "warning");
+    return;
+  }
+
+  try {
+    setConnectionState("Saving answer bank entry…");
+    await fetchJson(`/profiles/${encodeURIComponent(profile.id)}/answers`, {
+      method: "POST",
+      body: JSON.stringify({
+        prompt,
+        answer,
+        safe_to_autofill: safeToAutofill,
+      }),
+    });
+    await loadDashboardData({ silent: true });
+    setBatchMessage("Answer bank entry saved.", "success");
+    setConnectionState("Answer bank updated");
+  } catch (error) {
+    setBatchMessage(getErrorMessage(error), "error");
+    setConnectionState("Saving answer failed");
   }
 }
 
@@ -702,7 +756,7 @@ function renderStats() {
     ["Open jobs", state.jobs.filter((job) => job.availability === "open").length],
     ["Filtered", filteredJobs.length],
     ["Selected", state.selectedJobIds.size],
-    ["In progress", filteredJobs.filter((job) => ["queued", "running"].includes(getApplyStatus(job, latestRuns))).length],
+    ["In progress", filteredJobs.filter((job) => ["queued", "running", "submitting"].includes(getApplyStatus(job, latestRuns))).length],
     ["Needs review", filteredJobs.filter((job) => getApplyStatus(job, latestRuns) === "review").length],
     ["Done", filteredJobs.filter((job) => ["completed", "approved"].includes(getApplyStatus(job, latestRuns))).length],
     ["Failed", filteredJobs.filter((job) => ["failed", "rejected"].includes(getApplyStatus(job, latestRuns))).length],
@@ -895,8 +949,9 @@ function renderReviewDesk() {
     els.reviewContent.hidden = true;
     els.reviewNotesInput.value = "";
     els.reviewMeta.innerHTML = "";
+    els.reviewQuestions.innerHTML = "";
     els.reviewFields.innerHTML = "";
-    els.reviewResumeFrame.src = "about:blank";
+    els.reviewResumePreview.textContent = "";
     els.reviewScreenshot.removeAttribute("src");
     return;
   }
@@ -929,7 +984,9 @@ function renderReviewDesk() {
   const jobUrl = job?.url || finalUrl || "";
   const screenshotUrl = hasReviewScreenshot(selectedRun) ? getReviewScreenshotUrl(selectedRun) : "";
   const resumeUrl = tailoredResume?.pdf_path ? getReviewResumeUrl(selectedRun) : "";
+  const resumePreviewText = tailoredResume?.rendered_markdown || "";
   const resumeDecisionNote = getResumeDecisionNote(selectedRun);
+  const submissionError = pendingReview.submission_error || selectedRun.error_message || "";
 
   els.reviewNotesInput.value = notes;
   els.reviewMeta.innerHTML = `
@@ -942,6 +999,7 @@ function renderReviewDesk() {
       <p>${escapeHtml(finalUrl || "Final review URL not available")}</p>
       <p>Updated ${escapeHtml(formatDate(selectedRun.updated_at, true))}</p>
       <p>${escapeHtml(resumeDecisionNote || "Tailored resume generation status not recorded.")}</p>
+      ${submissionError ? `<p class="job-meta review-warning">${escapeHtml(`Last submit attempt failed: ${submissionError}`)}</p>` : ""}
     </div>
   `;
 
@@ -969,20 +1027,22 @@ function renderReviewDesk() {
     els.reviewFields.innerHTML = `<div class="empty-state">No extracted fields were recorded for this run.</div>`;
   }
 
+  renderReviewQuestions(selectedRun, fields);
+
   els.openReviewJobLink.hidden = !jobUrl;
   els.openReviewJobLink.href = jobUrl || "#";
   els.openReviewJobLink.setAttribute("aria-disabled", jobUrl ? "false" : "true");
 
   if (resumeUrl) {
     els.reviewResumeEmpty.hidden = true;
-    els.reviewResumeFrame.hidden = false;
-    els.reviewResumeFrame.src = resumeUrl;
+    els.reviewResumePreview.hidden = false;
+    els.reviewResumePreview.textContent = resumePreviewText || "Resume PDF is available. Use Open resume to view it.";
     els.openReviewResumeLink.hidden = false;
     els.openReviewResumeLink.href = resumeUrl;
   } else {
     els.reviewResumeEmpty.hidden = false;
-    els.reviewResumeFrame.hidden = true;
-    els.reviewResumeFrame.src = "about:blank";
+    els.reviewResumePreview.hidden = true;
+    els.reviewResumePreview.textContent = "";
     els.openReviewResumeLink.hidden = true;
     els.openReviewResumeLink.href = "#";
   }
@@ -1000,6 +1060,50 @@ function renderReviewDesk() {
     els.openReviewScreenshotLink.hidden = true;
     els.openReviewScreenshotLink.href = "#";
   }
+}
+
+function renderReviewQuestions(run, fields) {
+  const questions = getOutstandingReviewQuestions(run, fields);
+  if (!questions.length) {
+    els.reviewQuestions.innerHTML = `<div class="empty-state">No unresolved long-form job questions for this run.</div>`;
+    return;
+  }
+
+  els.reviewQuestions.innerHTML = questions
+    .map(
+      (field, index) => `
+        <article class="review-question-card" data-review-question="${escapeHtml(field.selector || field.label || String(index))}">
+          <h4>${escapeHtml(field.label || "Unnamed question")}</h4>
+          <p class="job-meta">${escapeHtml(field.selector || field.name || field.placeholder || field.field_type)}</p>
+          <textarea class="input answer-textarea answer-textarea-large" data-review-question-answer placeholder="Type the answer for this specific prompt."></textarea>
+          <label class="checkbox-row">
+            <input type="checkbox" data-review-question-safe checked />
+            <span>Save as safe autofill answer</span>
+          </label>
+          <div class="answer-card-actions">
+            <button class="button button-secondary small-button" type="button" data-save-review-answer="${escapeHtml(field.label || "")}">Save answer</button>
+          </div>
+        </article>
+      `,
+    )
+    .join("");
+
+  els.reviewQuestions.querySelectorAll("[data-save-review-answer]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const card = button.closest("[data-review-question]");
+      if (!card) {
+        return;
+      }
+      const answer = card.querySelector("[data-review-question-answer]").value.trim();
+      const safeToAutofill = card.querySelector("[data-review-question-safe]").checked;
+      const prompt = button.dataset.saveReviewAnswer;
+      if (!prompt || !answer) {
+        setBatchMessage("Answer text is required before saving.", "warning");
+        return;
+      }
+      await saveReviewQuestionAnswer(prompt, answer, safeToAutofill);
+    });
+  });
 }
 
 function renderPagination() {
@@ -1102,6 +1206,22 @@ function getSelectedReviewRun() {
   return getReviewRuns().find((run) => run.id === state.selectedReviewRunId) || null;
 }
 
+function getOutstandingReviewQuestions(run, fields) {
+  const populatedPrompts = new Set(
+    (getActiveProfile()?.answers || []).map((entry) => normalizePrompt(entry.prompt)),
+  );
+  return fields.filter((field) => {
+    const label = field.label || "";
+    const normalized = normalizePrompt(label);
+    const fieldType = String(field.field_type || "").toLowerCase();
+    const hasValue = Boolean((field.current_value || "").trim());
+    const sensitive = isSensitivePrompt(label);
+    const longForm = ["textarea", "text"].includes(fieldType);
+    const alreadyHandled = Boolean(field.answer_prompt || field.profile_path);
+    return longForm && !hasValue && !sensitive && !alreadyHandled && !populatedPrompts.has(normalized);
+  });
+}
+
 function getApplyStatus(job, latestRuns) {
   if (job.availability === "closed") {
     return "closed";
@@ -1112,7 +1232,7 @@ function getApplyStatus(job, latestRuns) {
 
 function isRunnableJob(job, latestRuns = getLatestRunMap()) {
   const status = getApplyStatus(job, latestRuns);
-  return state.selectedProfileId && job.availability === "open" && !["queued", "running", "review"].includes(status);
+  return state.selectedProfileId && job.availability === "open" && !["queued", "running", "review", "submitting"].includes(status);
 }
 
 function getSourceLabel(job) {
@@ -1150,6 +1270,21 @@ function getResumeDecisionNote(run) {
   const decisions = Array.isArray(run.decisions) ? run.decisions : [];
   const decision = decisions.find((entry) => entry && entry.source === "resume_customizer");
   return decision?.note || null;
+}
+
+function normalizePrompt(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isSensitivePrompt(value) {
+  const normalized = normalizePrompt(value);
+  return ["gender", "race", "ethnicity", "disability", "veteran", "pronoun", "sexual orientation", "date of birth", "dob", "age"].some(
+    (token) => normalized.includes(token),
+  );
 }
 
 function getPaginationMeta(totalItems = getFilteredJobs().length) {

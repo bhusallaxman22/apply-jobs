@@ -42,6 +42,7 @@ async def resolve_locator(page, target: str):
             page.get_by_role("link", name=regex),
             page.get_by_text(regex),
             page.locator(f'[name="{_attribute_escape(target)}"]'),
+            page.locator(f'[value="{_attribute_escape(target)}"]'),
         ]
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +12,9 @@ from app.schemas import ExtractedField, PageState
 
 class AnswerGenerationError(RuntimeError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -119,6 +123,12 @@ async def generate_long_form_answer(
     if not should_answer or not answer or confidence < 0.55:
         raise AnswerGenerationError(note or "Model declined to answer from the supplied resume/profile context.")
 
+    logger.info(
+        "Generated AI answer for prompt %r with confidence %.2f using source %s.",
+        field.label,
+        confidence,
+        source_path,
+    )
     return GeneratedAnswer(
         answer=answer,
         confidence=max(0.0, min(confidence, 1.0)),
