@@ -141,7 +141,7 @@ async def execute_run(run_id: str) -> None:
                         "action": "generate",
                         "target": "resume",
                         "source": "resume_customizer",
-                        "note": f"Generated tailored resume at {variant.pdf_path}",
+                        "note": f"Generated resume variant at {variant.pdf_path}",
                     }
                 )
             except ResumeCustomizationError as exc:

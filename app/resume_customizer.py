@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 from pypdf import PdfReader
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
@@ -16,7 +18,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate, Spacer
 
 from app.config import get_settings
-from app.llm import request_json_completion
+from app.llm import LLMError, request_json_completion
 from app.schemas import ResumeCustomizeRequest, ResumeVariantRead, TailoredResumeDocument
 
 
@@ -104,6 +106,14 @@ def build_job_context(
     }
 
 
+def fallback_summary(job_context: dict[str, str | None]) -> str:
+    role = job_context.get("job_title") or "the target role"
+    company = job_context.get("company")
+    if company:
+        return f"Fallback resume variant generated from the uploaded profile resume for {role} at {company}. Review before submission."
+    return f"Fallback resume variant generated from the uploaded profile resume for {role}. Review before submission."
+
+
 def profile_snapshot(profile_data: dict[str, Any]) -> dict[str, Any]:
     scrubbed = deepcopy(profile_data)
     documents = dict(scrubbed.get("documents", {}))
@@ -179,22 +189,47 @@ Output schema:
 """.strip()
 
 
+def fallback_resume_document(source_text: str, job_context: dict[str, str | None]) -> TailoredResumeDocument:
+    lines = [line.strip("-• ").strip() for line in source_text.splitlines()]
+    filtered_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if len(normalized) < 18:
+            continue
+        if normalized.lower() in seen:
+            continue
+        seen.add(normalized.lower())
+        filtered_lines.append(normalized)
+        if len(filtered_lines) >= 8:
+            break
+
+    return TailoredResumeDocument(
+        summary=fallback_summary(job_context),
+        achievements=filtered_lines[:6],
+        review_notes=["LLM tailoring was unavailable, so this variant falls back to the uploaded profile resume."],
+    )
+
+
 async def generate_tailored_resume_document(
     profile_data: dict[str, Any],
     job_context: dict[str, str | None],
 ) -> tuple[TailoredResumeDocument, str]:
     source_text, source_path = load_resume_source(profile_data)
-    raw = await request_json_completion(
-        system_prompt="You write accurate resumes. Return JSON only.",
-        user_prompt=generation_prompt(
-            source_text=source_text,
-            source_path=source_path,
-            profile_data=profile_data,
-            job_context=job_context,
-        ),
-        temperature=0.2,
-    )
-    return TailoredResumeDocument.model_validate(raw), source_path
+    try:
+        raw = await request_json_completion(
+            system_prompt="You write accurate resumes. Return JSON only.",
+            user_prompt=generation_prompt(
+                source_text=source_text,
+                source_path=source_path,
+                profile_data=profile_data,
+                job_context=job_context,
+            ),
+            temperature=0.2,
+        )
+        return TailoredResumeDocument.model_validate(raw), source_path
+    except (LLMError, ValidationError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return fallback_resume_document(source_text, job_context), source_path
 
 
 def render_resume_markdown(document: TailoredResumeDocument, profile_data: dict[str, Any]) -> str:
@@ -381,6 +416,39 @@ def render_resume_pdf(document: TailoredResumeDocument, profile_data: dict[str, 
     doc.build(story)
 
 
+def resume_pdf_path(profile_data: dict[str, Any]) -> Path | None:
+    documents = dict(profile_data.get("documents", {}))
+    raw_path = documents.get("resume_pdf")
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    return path if path.exists() else None
+
+
+def fallback_resume_markdown(
+    *,
+    profile_data: dict[str, Any],
+    job_context: dict[str, str | None],
+    source_text: str,
+    reason: str,
+) -> str:
+    identity = dict(profile_data.get("identity", {}))
+    header = identity.get("full_name") or "Uploaded Resume"
+    lines = [
+        f"# {header}",
+        "",
+        f"Fallback resume variant generated for {job_context.get('job_title') or 'the selected role'}.",
+        "",
+        f"Reason: {reason}",
+        "",
+        "## Source Resume",
+        "",
+        source_text.strip() or "Source text could not be extracted from the uploaded resume PDF.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 async def create_resume_variant(
     *,
     profile_id: str,
@@ -393,7 +461,6 @@ async def create_resume_variant(
         job_title=job_request.job_title,
         job_description=job_request.job_description,
     )
-    document, source_path = await generate_tailored_resume_document(profile_data, job_context)
 
     settings = get_settings()
     variant_dir = settings.resume_variants_path / profile_id
@@ -407,9 +474,31 @@ async def create_resume_variant(
     markdown_path = variant_dir / f"{timestamp}-{filename_slug}.md"
     pdf_path = variant_dir / f"{timestamp}-{filename_slug}.pdf"
 
-    rendered_markdown = render_resume_markdown(document, profile_data)
-    markdown_path.write_text(rendered_markdown, encoding="utf-8")
-    render_resume_pdf(document, profile_data, pdf_path)
+    try:
+        document, source_path = await generate_tailored_resume_document(profile_data, job_context)
+        rendered_markdown = render_resume_markdown(document, profile_data)
+        markdown_path.write_text(rendered_markdown, encoding="utf-8")
+        render_resume_pdf(document, profile_data, pdf_path)
+        review_notes = document.review_notes
+    except ResumeCustomizationError as exc:
+        base_pdf_path = resume_pdf_path(profile_data)
+        source_text = ""
+        source_path = str(base_pdf_path) if base_pdf_path else "uploaded-profile-resume"
+        if base_pdf_path is None:
+            raise
+        try:
+            source_text = extract_pdf_text(base_pdf_path)
+        except Exception:
+            source_text = ""
+        shutil.copyfile(base_pdf_path, pdf_path)
+        rendered_markdown = fallback_resume_markdown(
+            profile_data=profile_data,
+            job_context=job_context,
+            source_text=source_text,
+            reason=str(exc),
+        )
+        markdown_path.write_text(rendered_markdown, encoding="utf-8")
+        review_notes = [f"Used uploaded profile resume as a fallback because tailoring failed: {exc}"]
 
     return ResumeVariantRead(
         profile_id=profile_id,
@@ -420,6 +509,6 @@ async def create_resume_variant(
         pdf_path=str(pdf_path),
         source_path=source_path,
         rendered_markdown=rendered_markdown,
-        review_notes=document.review_notes,
+        review_notes=review_notes,
         generated_at=utc_now(),
     )

@@ -5,9 +5,11 @@ from typing import Iterable
 from app.agent.actions import click_target, fill_field
 from app.agent.extractor import extract_form_schema
 from app.agent.safety import is_safe_field, is_sensitive_label
+from app.answer_generator import AnswerGenerationError, generate_long_form_answer
 from app.answer_bank import best_answer_match
 from app.models import AnswerEntry
 from app.profile_store import lookup_profile_value
+from app.schemas import PageState
 from app.schemas import AgentDecision, ExtractedField
 
 
@@ -35,6 +37,7 @@ class GenericAdapter:
         answers: Iterable[AnswerEntry],
     ) -> tuple[list[ExtractedField], list[dict], list[dict]]:
         fields = await self.extract_fields(page)
+        page_state = await self._page_state(page)
         filled: list[dict] = []
         skipped: list[dict] = []
 
@@ -103,6 +106,46 @@ class GenericAdapter:
                         )
                     continue
 
+                try:
+                    generated = await generate_long_form_answer(
+                        field=field,
+                        page_state=page_state,
+                        profile_data=profile_data,
+                    )
+                    await fill_field(page, field, generated.answer)
+                    field.safe_to_autofill = True
+                    field.answer_prompt = f"AI-generated from {generated.source_path}"
+                    filled.append(
+                        AgentDecision(
+                            action="fill",
+                            target=field.label,
+                            value=generated.answer[:1000],
+                            source="llm_answer",
+                            confidence=generated.confidence,
+                            note=generated.note or f"Generated from selected profile resume: {generated.source_path}",
+                        ).model_dump()
+                    )
+                    continue
+                except AnswerGenerationError as exc:
+                    skipped.append(
+                        AgentDecision(
+                            action="skip",
+                            target=field.label,
+                            source="llm_answer",
+                            note=f"AI answer generation deferred to review: {exc}",
+                        ).model_dump()
+                    )
+                except Exception as exc:
+                    skipped.append(
+                        AgentDecision(
+                            action="skip",
+                            target=field.label,
+                            source="llm_answer",
+                            note=f"AI answer generation failed and was deferred to review: {exc}",
+                        ).model_dump()
+                    )
+                continue
+
             skipped.append(
                 AgentDecision(
                     action="skip",
@@ -113,7 +156,12 @@ class GenericAdapter:
             )
 
         refreshed_fields = await self.extract_fields(page)
-        return refreshed_fields, filled, skipped
+        return merge_field_metadata(fields, refreshed_fields), filled, skipped
+
+    async def _page_state(self, page) -> PageState:
+        from app.agent.extractor import extract_page_state
+
+        return await extract_page_state(page)
 
 
 def lookup_profile_value_for_field(field: ExtractedField, profile_data: dict) -> tuple[str | None, object]:
@@ -130,3 +178,22 @@ def lookup_profile_value_for_field(field: ExtractedField, profile_data: dict) ->
         if value is not None:
             return path, value
     return None, None
+
+
+def merge_field_metadata(original_fields: list[ExtractedField], refreshed_fields: list[ExtractedField]) -> list[ExtractedField]:
+    original_by_key = {}
+    for field in original_fields:
+        key = field.selector or field.label or field.name or field.placeholder
+        if key:
+            original_by_key[key] = field
+
+    merged: list[ExtractedField] = []
+    for field in refreshed_fields:
+        key = field.selector or field.label or field.name or field.placeholder
+        original = original_by_key.get(key) if key else None
+        if original is not None:
+            field.safe_to_autofill = original.safe_to_autofill
+            field.profile_path = original.profile_path
+            field.answer_prompt = original.answer_prompt
+        merged.append(field)
+    return merged
