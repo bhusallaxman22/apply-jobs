@@ -6,9 +6,11 @@ from sqlalchemy.orm import Session
 from app.agent.runner import execute_run
 from app.db import get_session
 from app.models import Job, Profile, Run
-from app.schemas import RunApproval, RunCreate, RunRead
+from app.schemas import BulkRunCreate, BulkRunRead, RunApproval, RunCreate, RunRead
 
 router = APIRouter()
+
+ACTIVE_RUN_STATUSES = {"queued", "running", "review"}
 
 
 def _serialize_run(run: Run) -> RunRead:
@@ -32,8 +34,17 @@ def _serialize_run(run: Run) -> RunRead:
 
 
 @router.get("", response_model=list[RunRead])
-def list_runs(session: Session = Depends(get_session)) -> list[RunRead]:
-    runs = session.query(Run).order_by(Run.created_at.desc()).all()
+def list_runs(
+    profile_id: str | None = None,
+    job_id: str | None = None,
+    session: Session = Depends(get_session),
+) -> list[RunRead]:
+    query = session.query(Run)
+    if profile_id is not None:
+        query = query.filter(Run.profile_id == profile_id)
+    if job_id is not None:
+        query = query.filter(Run.job_id == job_id)
+    runs = query.order_by(Run.created_at.desc()).all()
     return [_serialize_run(run) for run in runs]
 
 
@@ -43,6 +54,21 @@ def get_run(run_id: str, session: Session = Depends(get_session)) -> RunRead:
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
     return _serialize_run(run)
+
+
+def _create_run_record(
+    *,
+    session: Session,
+    background_tasks: BackgroundTasks,
+    profile: Profile,
+    job: Job,
+) -> Run:
+    run = Run(job_id=job.id, profile_id=profile.id)
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    background_tasks.add_task(execute_run, run.id)
+    return run
 
 
 @router.post("", response_model=RunRead)
@@ -68,14 +94,66 @@ def create_run(
         )
         session.add(job)
         session.flush()
+        session.commit()
+        session.refresh(job)
 
-    run = Run(job_id=job.id, profile_id=profile.id)
-    session.add(run)
-    session.commit()
-    session.refresh(run)
-
-    background_tasks.add_task(execute_run, run.id)
+    run = _create_run_record(session=session, background_tasks=background_tasks, profile=profile, job=job)
     return _serialize_run(run)
+
+
+@router.post("/bulk", response_model=BulkRunRead)
+def create_bulk_runs(
+    payload: BulkRunCreate,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+) -> BulkRunRead:
+    profile = session.get(Profile, payload.profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    jobs = session.query(Job).filter(Job.id.in_(payload.job_ids)).all()
+    jobs_by_id = {job.id: job for job in jobs}
+    created_runs: list[RunRead] = []
+    skipped_jobs: list[dict[str, str]] = []
+
+    for job_id in payload.job_ids:
+        job = jobs_by_id.get(job_id)
+        if job is None:
+            skipped_jobs.append({"job_id": job_id, "reason": "Job not found."})
+            continue
+        if job.availability == "closed":
+            skipped_jobs.append({"job_id": job_id, "reason": "Job is closed."})
+            continue
+
+        existing = (
+            session.query(Run)
+            .filter(
+                Run.profile_id == profile.id,
+                Run.job_id == job.id,
+                Run.status.in_(ACTIVE_RUN_STATUSES),
+            )
+            .order_by(Run.created_at.desc())
+            .first()
+        )
+        if existing is not None:
+            skipped_jobs.append({"job_id": job.id, "reason": f"Existing active run: {existing.status}."})
+            continue
+
+        created_run = _create_run_record(
+            session=session,
+            background_tasks=background_tasks,
+            profile=profile,
+            job=job,
+        )
+        created_runs.append(_serialize_run(created_run))
+
+    return BulkRunRead(
+        requested_count=len(payload.job_ids),
+        created_count=len(created_runs),
+        skipped_count=len(skipped_jobs),
+        created_runs=created_runs,
+        skipped_jobs=skipped_jobs,
+    )
 
 
 @router.post("/{run_id}/approve", response_model=RunRead)

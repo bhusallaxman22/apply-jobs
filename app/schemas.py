@@ -83,6 +83,25 @@ class RunCreate(BaseModel):
         return self
 
 
+class BulkRunCreate(BaseModel):
+    profile_id: str
+    job_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_job_ids(self) -> "BulkRunCreate":
+        if not self.job_ids:
+            raise ValueError("job_ids must contain at least one job id.")
+        return self
+
+
+class BulkRunRead(BaseModel):
+    requested_count: int
+    created_count: int
+    skipped_count: int
+    created_runs: list["RunRead"]
+    skipped_jobs: list[dict[str, str]]
+
+
 class JobSourceCreate(BaseModel):
     name: str | None = None
     source_url: str | None = None
@@ -253,3 +272,6 @@ class ResumeVariantRead(BaseModel):
     rendered_markdown: str
     review_notes: list[str] = Field(default_factory=list)
     generated_at: datetime
+
+
+BulkRunRead.model_rebuild()
