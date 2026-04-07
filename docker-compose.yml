@@ -1,0 +1,42 @@
+services:
+  job-agent-api:
+    build: .
+    container_name: job-agent-api
+    restart: unless-stopped
+    ports:
+      - "8095:8095"
+    environment:
+      APP_ENV: prod
+      HOST: 0.0.0.0
+      PORT: 8095
+      DATABASE_URL: postgresql+psycopg://jobagent:jobagent@postgres:5432/jobagent
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://192.168.0.142:11434
+      OLLAMA_MODEL: qwen3:8b
+      STORAGE_ROOT: /data
+      HEADLESS: "true"
+      REQUIRE_HUMAN_APPROVAL: "true"
+    volumes:
+      - /mnt/mainpool/apps/job-agent/data:/data
+      - /mnt/mainpool/apps/job-agent/app:/srv/job-agent/app
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:16
+    container_name: job-agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jobagent
+      POSTGRES_PASSWORD: jobagent
+      POSTGRES_DB: jobagent
+    volumes:
+      - /mnt/mainpool/apps/job-agent/postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: job-agent-redis
+    restart: unless-stopped
+    volumes:
+      - /mnt/mainpool/apps/job-agent/redis:/data
