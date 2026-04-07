@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,8 @@ from app.site_adapters import get_adapter
 
 logger = logging.getLogger(__name__)
 
+CHECKPOINT_INTERVAL_SECONDS = 10.0
+MAX_PROGRESS_SCREENSHOTS = 120
 SUBMISSION_SUCCESS_TEXT = (
     "thank you for applying",
     "application submitted",
@@ -40,6 +43,20 @@ def _artifact_path(root: Path, run_id: str, suffix: str) -> Path:
     return root / f"{run_id}-{timestamp}-{suffix}"
 
 
+def _stamp_decision(entry: dict) -> dict:
+    stamped = dict(entry)
+    stamped.setdefault("logged_at", utc_now().isoformat())
+    return stamped
+
+
+def _append_decision(decisions: list[dict], entry: dict) -> None:
+    decisions.append(_stamp_decision(entry))
+
+
+def _extend_decisions(decisions: list[dict], entries: list[dict]) -> None:
+    decisions.extend(_stamp_decision(entry) for entry in entries)
+
+
 async def _save_snapshot(page, run_id: str, *, prefix: str = "latest", suffix: str = "page") -> dict:
     settings = get_settings()
     screenshot_path = _artifact_path(settings.screenshots_path, run_id, f"{suffix}.png")
@@ -52,12 +69,110 @@ async def _save_snapshot(page, run_id: str, *, prefix: str = "latest", suffix: s
     }
 
 
-async def _planner_navigate(page, decisions: list[dict]) -> None:
+async def _persist_run_progress(
+    *,
+    run_id: str,
+    status: str,
+    decisions: list[dict],
+    artifacts: dict,
+    extracted_fields: list[dict],
+    result: dict,
+    error_message: str | None = None,
+) -> None:
+    with session_scope() as session:
+        run = session.get(Run, run_id)
+        if run is None:
+            return
+        job = session.get(Job, run.job_id)
+        run.status = status
+        run.decisions = deepcopy(decisions)
+        run.artifacts = deepcopy(artifacts)
+        run.extracted_fields = deepcopy(extracted_fields)
+        run.result = deepcopy(result)
+        if error_message is not None:
+            run.error_message = error_message
+        if job is not None:
+            job.status = status
+
+
+async def _checkpoint_progress(
+    *,
+    run_id: str,
+    page,
+    status: str,
+    decisions: list[dict],
+    artifacts: dict,
+    extracted_fields: list[dict],
+    result: dict,
+    checkpoint_state: dict,
+    reason: str,
+    force: bool = False,
+) -> dict | None:
+    now = time.monotonic()
+    last_monotonic = checkpoint_state.get("last_monotonic", 0.0)
+    if not force and now - last_monotonic < CHECKPOINT_INTERVAL_SECONDS:
+        return None
+
+    checkpoint_index = int(checkpoint_state.get("count", 0)) + 1
+    snapshot = await _save_snapshot(
+        page,
+        run_id,
+        prefix="latest",
+        suffix=f"checkpoint-{checkpoint_index:03d}",
+    )
+    page_state = await extract_page_state(page)
+    captured_at = utc_now().isoformat()
+    entry = {
+        "path": snapshot["latest_screenshot"],
+        "html_path": snapshot["latest_html"],
+        "captured_at": captured_at,
+        "url": page_state.url,
+        "title": page_state.title,
+        "reason": reason,
+        "index": checkpoint_index,
+    }
+    history = list(artifacts.get("progress_screenshots") or [])
+    history.append(entry)
+    artifacts["progress_screenshots"] = history[-MAX_PROGRESS_SCREENSHOTS:]
+    artifacts["latest_screenshot"] = snapshot["latest_screenshot"]
+    artifacts["latest_html"] = snapshot["latest_html"]
+
+    checkpoint_state["last_monotonic"] = now
+    checkpoint_state["count"] = checkpoint_index
+    _append_decision(
+        decisions,
+        {
+            "action": "observe",
+            "target": page_state.url,
+            "source": "checkpoint",
+            "note": reason,
+        },
+    )
+    result.update(
+        {
+            "current_url": page_state.url,
+            "current_page_title": page_state.title,
+            "last_checkpoint_at": captured_at,
+        }
+    )
+    await _persist_run_progress(
+        run_id=run_id,
+        status=status,
+        decisions=decisions,
+        artifacts=artifacts,
+        extracted_fields=extracted_fields,
+        result=result,
+    )
+    return page_state
+
+
+async def _planner_navigate(page, decisions: list[dict], progress_hook=None) -> None:
     settings = get_settings()
     for _ in range(settings.max_agent_steps):
         page_state = await extract_page_state(page)
         if should_stop_for_review(page_state):
-            decisions.append(
+            _append_decision(
+                decisions,
                 {
                     "action": "done",
                     "target": "review gate",
@@ -68,7 +183,7 @@ async def _planner_navigate(page, decisions: list[dict]) -> None:
             return
 
         action = await decide_next_action(page_state)
-        decisions.append({**action.model_dump(), "source": "planner"})
+        _append_decision(decisions, {**action.model_dump(), "source": "planner"})
 
         if action.action == "click":
             await click_target(page, action.target)
@@ -82,6 +197,8 @@ async def _planner_navigate(page, decisions: list[dict]) -> None:
             raise RuntimeError(f"Planner stopped with action: {action.model_dump()}")
 
         await page.wait_for_load_state("domcontentloaded")
+        if progress_hook is not None:
+            await progress_hook(f"Planner executed {action.action} on {action.target}.")
 
 
 async def _wait_for_page_settle(page) -> None:
@@ -138,7 +255,8 @@ async def _click_submit(page, decisions: list[dict]) -> str:
     for target in _candidate_submit_targets(page_state):
         try:
             await click_target(page, target)
-            decisions.append(
+            _append_decision(
+                decisions,
                 {
                     "action": "click",
                     "target": target,
@@ -171,22 +289,25 @@ async def _progress_application_until_submit(
     profile_data: dict,
     answer_entries: list,
     decisions: list[dict],
+    progress_hook=None,
 ) -> list[dict]:
     settings = get_settings()
     latest_fields: list[dict] = []
 
     for _ in range(settings.max_agent_steps):
         fields, filled, skipped = await adapter.autofill_fields(page, profile_data, answer_entries)
-        decisions.extend(filled)
-        decisions.extend(skipped)
+        _extend_decisions(decisions, filled)
+        _extend_decisions(decisions, skipped)
         latest_fields = [field.model_dump() for field in fields]
+        if progress_hook is not None:
+            await progress_hook(f"Autofill inspected {len(fields)} fields.")
 
         page_state = await extract_page_state(page)
         if should_stop_for_review(page_state):
             return latest_fields
 
         action = await decide_next_action(page_state)
-        decisions.append({**action.model_dump(), "source": "planner"})
+        _append_decision(decisions, {**action.model_dump(), "source": "planner"})
 
         if action.action == "click":
             await click_target(page, action.target)
@@ -200,6 +321,8 @@ async def _progress_application_until_submit(
             raise RuntimeError(f"Planner stopped with action: {action.model_dump()}")
 
         await _wait_for_page_settle(page)
+        if progress_hook is not None:
+            await progress_hook(f"Planner advanced with {action.action} on {action.target}.")
 
     return latest_fields
 
@@ -251,6 +374,21 @@ async def submit_approved_run(run_id: str) -> None:
         logger.info("Starting approved-submit flow for run %s on %s.", run_id, review_url)
 
     trace_path = _artifact_path(settings.traces_path, run_id, "submit-trace.zip")
+    checkpoint_state = {"last_monotonic": 0.0, "count": len(artifacts.get("progress_screenshots") or [])}
+
+    async def progress_hook(reason: str, *, force: bool = False) -> dict | None:
+        return await _checkpoint_progress(
+            run_id=run_id,
+            page=page,
+            status="submitting",
+            decisions=decisions,
+            artifacts=artifacts,
+            extracted_fields=extracted_fields,
+            result=result,
+            checkpoint_state=checkpoint_state,
+            reason=reason,
+            force=force,
+        )
 
     try:
         async with async_playwright() as playwright:
@@ -267,12 +405,14 @@ async def submit_approved_run(run_id: str) -> None:
             await context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = await context.new_page()
             await page.goto(review_url, wait_until="domcontentloaded")
+            await progress_hook("Opened approved run at the saved review URL.", force=True)
 
             adapter = get_adapter(platform)
             initial_state = await extract_page_state(page)
             if not should_stop_for_review(initial_state):
                 started = await adapter.start_application(page)
-                decisions.append(
+                _append_decision(
+                    decisions,
                     {
                         "action": "click" if started else "fallback",
                         "target": "apply",
@@ -283,6 +423,7 @@ async def submit_approved_run(run_id: str) -> None:
                 if started:
                     logger.info("Run %s reopened application flow with adapter %s.", run_id, adapter.name)
                     await _wait_for_page_settle(page)
+                await progress_hook("Tried to reopen the application form after approval.", force=True)
 
             extracted_fields = await _progress_application_until_submit(
                 page,
@@ -290,6 +431,7 @@ async def submit_approved_run(run_id: str) -> None:
                 profile_data,
                 answer_entries,
                 decisions,
+                progress_hook=progress_hook,
             )
 
             review_state = await extract_page_state(page)
@@ -299,6 +441,7 @@ async def submit_approved_run(run_id: str) -> None:
             await _click_submit(page, decisions)
             await _wait_for_page_settle(page)
             final_state = await extract_page_state(page)
+            await progress_hook("Clicked final submit control after approval.", force=True)
 
             submitted_artifacts = await _save_snapshot(page, run_id, prefix="submitted", suffix="submitted-page")
             artifacts.update(submitted_artifacts)
@@ -343,6 +486,7 @@ async def submit_approved_run(run_id: str) -> None:
 
             await browser.close()
     except Exception as exc:
+        result.update({"status": "review_required", "submitted": False})
         with session_scope() as session:
             run = session.get(Run, run_id)
             job = session.get(Job, run.job_id) if run else None
@@ -407,6 +551,7 @@ async def execute_run(run_id: str) -> None:
     artifacts: dict = {}
     result: dict = {}
     extracted_fields: list[dict] = []
+    checkpoint_state = {"last_monotonic": 0.0, "count": 0}
 
     try:
         async with async_playwright() as playwright:
@@ -419,6 +564,22 @@ async def execute_run(run_id: str) -> None:
             await context.tracing.start(screenshots=True, snapshots=True, sources=True)
             page = await context.new_page()
             await page.goto(job_url, wait_until="domcontentloaded")
+
+            async def progress_hook(reason: str, *, force: bool = False) -> dict | None:
+                return await _checkpoint_progress(
+                    run_id=run_id,
+                    page=page,
+                    status="running",
+                    decisions=decisions,
+                    artifacts=artifacts,
+                    extracted_fields=extracted_fields,
+                    result=result,
+                    checkpoint_state=checkpoint_state,
+                    reason=reason,
+                    force=force,
+                )
+
+            await progress_hook("Opened the job page.", force=True)
 
             page_state = await extract_page_state(page)
             platform = detect_platform(page_state)
@@ -441,7 +602,8 @@ async def execute_run(run_id: str) -> None:
                 documents["tailored_resume_markdown_path"] = variant.markdown_path
                 profile_data_for_run["documents"] = documents
                 artifacts["tailored_resume"] = variant.model_dump(mode="json")
-                decisions.append(
+                _append_decision(
+                    decisions,
                     {
                         "action": "generate",
                         "target": "resume",
@@ -451,7 +613,8 @@ async def execute_run(run_id: str) -> None:
                 )
                 logger.info("Run %s generated resume variant at %s.", run_id, variant.pdf_path)
             except ResumeCustomizationError as exc:
-                decisions.append(
+                _append_decision(
+                    decisions,
                     {
                         "action": "skip",
                         "target": "resume",
@@ -461,7 +624,8 @@ async def execute_run(run_id: str) -> None:
                 )
                 logger.warning("Run %s skipped resume customization: %s", run_id, exc)
             except Exception as exc:
-                decisions.append(
+                _append_decision(
+                    decisions,
                     {
                         "action": "skip",
                         "target": "resume",
@@ -483,7 +647,8 @@ async def execute_run(run_id: str) -> None:
                     job.description = page_state.visible_text[:8000]
 
             started = await adapter.start_application(page)
-            decisions.append(
+            _append_decision(
+                decisions,
                 {
                     "action": "click" if started else "fallback",
                     "target": "apply",
@@ -497,13 +662,14 @@ async def execute_run(run_id: str) -> None:
                 adapter.name,
                 started,
             )
+            await progress_hook("Attempted to click the apply entrypoint.", force=True)
 
             if not started:
-                await _planner_navigate(page, decisions)
+                await _planner_navigate(page, decisions, progress_hook=progress_hook)
 
             fields, filled, skipped = await adapter.autofill_fields(page, profile_data_for_run, answer_entries)
-            decisions.extend(filled)
-            decisions.extend(skipped)
+            _extend_decisions(decisions, filled)
+            _extend_decisions(decisions, skipped)
             extracted_fields = [field.model_dump() for field in fields]
             logger.info(
                 "Run %s autofill completed with %d fields, %d filled actions, %d skipped actions.",
@@ -512,6 +678,7 @@ async def execute_run(run_id: str) -> None:
                 len(filled),
                 len(skipped),
             )
+            await progress_hook(f"Autofill completed with {len(fields)} extracted fields.", force=True)
 
             final_page_state = await extract_page_state(page)
             review_required = settings.require_human_approval or should_stop_for_review(final_page_state)
@@ -532,6 +699,14 @@ async def execute_run(run_id: str) -> None:
                 "page_title": final_page_state.title,
                 "status": "review_required" if review_required else "completed",
             }
+            await _persist_run_progress(
+                run_id=run_id,
+                status="review" if review_required else "completed",
+                decisions=decisions,
+                artifacts=artifacts,
+                extracted_fields=extracted_fields,
+                result=result,
+            )
 
             with session_scope() as session:
                 run = session.get(Run, run_id)

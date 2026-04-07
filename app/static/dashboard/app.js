@@ -4,6 +4,8 @@ const state = {
   jobs: [],
   runs: [],
   selectedProfileId: null,
+  selectedLogRunId: null,
+  selectedLogScreenshotIndex: null,
   selectedReviewRunId: null,
   selectedJobIds: new Set(),
   reviewNotesDrafts: {},
@@ -71,6 +73,18 @@ const els = {
   paginationSummary: document.getElementById("paginationSummary"),
   previousPageButton: document.getElementById("previousPageButton"),
   nextPageButton: document.getElementById("nextPageButton"),
+  logDeskSection: document.getElementById("logDeskSection"),
+  logSummary: document.getElementById("logSummary"),
+  logRunSelect: document.getElementById("logRunSelect"),
+  logEmptyState: document.getElementById("logEmptyState"),
+  logContent: document.getElementById("logContent"),
+  logMeta: document.getElementById("logMeta"),
+  openLogJobLink: document.getElementById("openLogJobLink"),
+  openLogScreenshotLink: document.getElementById("openLogScreenshotLink"),
+  logCheckpointList: document.getElementById("logCheckpointList"),
+  logScreenshot: document.getElementById("logScreenshot"),
+  logScreenshotEmpty: document.getElementById("logScreenshotEmpty"),
+  logTimeline: document.getElementById("logTimeline"),
   reviewDeskSection: document.getElementById("reviewDeskSection"),
   reviewSummary: document.getElementById("reviewSummary"),
   reviewRunSelect: document.getElementById("reviewRunSelect"),
@@ -96,7 +110,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadDashboardData();
   window.setInterval(() => {
     loadDashboardData({ silent: true }).catch(() => {});
-  }, 20000);
+  }, 10000);
 });
 
 function bindEvents() {
@@ -194,6 +208,10 @@ function bindEvents() {
     const totalPages = getPaginationMeta().totalPages;
     state.pagination.page = Math.min(totalPages, state.pagination.page + 1);
     renderDashboard();
+  });
+
+  els.logRunSelect.addEventListener("change", (event) => {
+    selectLogRun(event.target.value || null);
   });
 
   els.reviewRunSelect.addEventListener("change", (event) => {
@@ -299,6 +317,7 @@ async function loadDashboardData({ silent = false } = {}) {
 async function loadRuns() {
   const url = state.selectedProfileId ? `/runs?profile_id=${encodeURIComponent(state.selectedProfileId)}` : "/runs";
   state.runs = await fetchJson(url);
+  syncSelectedLogRun();
   syncSelectedReviewRun();
 }
 
@@ -569,6 +588,7 @@ function renderDashboard() {
   renderRuns();
   renderJobs();
   renderPagination();
+  renderLogDesk();
   renderReviewDesk();
   renderSortIndicators();
 }
@@ -791,10 +811,12 @@ function renderRuns() {
     .map((run) => {
       const job = jobsById.get(run.job_id);
       const title = job?.title || job?.url || run.job_id;
-      const reviewButton =
-        normalizeStatus(run.status) === "review"
-          ? `<div class="source-card-actions"><button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(run.id)}">Open review</button></div>`
-          : "";
+      const actionButtons = [
+        `<button class="button button-secondary small-button" type="button" data-log-run="${escapeHtml(run.id)}">Open log</button>`,
+      ];
+      if (normalizeStatus(run.status) === "review") {
+        actionButtons.push(`<button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(run.id)}">Open review</button>`);
+      }
       return `
         <div class="run-card">
           <div class="run-card-header">
@@ -802,12 +824,18 @@ function renderRuns() {
             <span class="badge badge-${escapeHtml(normalizeStatus(run.status))}">${escapeHtml(run.status)}</span>
           </div>
           <p>${escapeHtml(job?.company || "Unknown company")} · ${escapeHtml(formatDate(run.updated_at, true))}</p>
-          ${reviewButton}
+          <div class="source-card-actions">${actionButtons.join("")}</div>
         </div>
       `;
     })
     .join("");
 
+  els.runList.querySelectorAll("[data-log-run]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectLogRun(button.dataset.logRun);
+      els.logDeskSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
   els.runList.querySelectorAll("[data-review-run]").forEach((button) => {
     button.addEventListener("click", () => {
       selectReviewRun(button.dataset.reviewRun);
@@ -898,6 +926,11 @@ function renderJobs() {
             <div class="stack">
               <button class="button button-secondary small-button" type="button" data-run-job="${escapeHtml(job.id)}" ${disabled}>Queue</button>
               ${
+                latestRun
+                  ? `<button class="button button-secondary small-button" type="button" data-log-run="${escapeHtml(latestRun.id)}">Logs</button>`
+                  : ""
+              }
+              ${
                 latestRun && applyStatus === "review"
                   ? `<button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(latestRun.id)}">Review</button>`
                   : ""
@@ -928,12 +961,137 @@ function renderJobs() {
     });
   });
 
+  els.jobsTableBody.querySelectorAll("[data-log-run]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectLogRun(button.dataset.logRun);
+      els.logDeskSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+
   els.jobsTableBody.querySelectorAll("[data-review-run]").forEach((button) => {
     button.addEventListener("click", () => {
       selectReviewRun(button.dataset.reviewRun);
       els.reviewDeskSection.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   });
+}
+
+function renderLogDesk() {
+  const logRuns = getLogRuns();
+  const activeCount = logRuns.filter((run) => ["queued", "running", "submitting"].includes(normalizeStatus(run.status))).length;
+  els.logSummary.textContent = logRuns.length
+    ? `${logRuns.length} run${logRuns.length === 1 ? "" : "s"} available · ${activeCount} active.`
+    : "No runs available.";
+
+  if (!logRuns.length) {
+    els.logRunSelect.innerHTML = `<option value="">No runs</option>`;
+    els.logRunSelect.disabled = true;
+    els.logEmptyState.hidden = false;
+    els.logContent.hidden = true;
+    els.logMeta.innerHTML = "";
+    els.logCheckpointList.innerHTML = "";
+    els.logTimeline.innerHTML = "";
+    els.logScreenshot.removeAttribute("src");
+    return;
+  }
+
+  const selectedRun = getSelectedLogRun();
+  els.logRunSelect.innerHTML = logRuns
+    .map((run) => {
+      const selected = run.id === selectedRun?.id ? "selected" : "";
+      return `<option value="${escapeHtml(run.id)}" ${selected}>${escapeHtml(formatReviewRunLabel(run))}</option>`;
+    })
+    .join("");
+  els.logRunSelect.disabled = false;
+  els.logEmptyState.hidden = true;
+  els.logContent.hidden = false;
+
+  if (!selectedRun) {
+    return;
+  }
+
+  const job = getJobById(selectedRun.job_id);
+  const jobTitle = job?.title || selectedRun.result?.page_title || selectedRun.job_id;
+  const jobCompany = job?.company || selectedRun.result?.company || "Unknown company";
+  const currentUrl = selectedRun.result?.current_url || selectedRun.result?.final_url || job?.url || "";
+  const screenshotEntries = getLogScreenshotEntries(selectedRun);
+  const selectedScreenshot = getSelectedLogScreenshot(selectedRun, screenshotEntries);
+  const notes = selectedRun.pending_review?.notes || "";
+
+  els.logMeta.innerHTML = `
+    <div class="review-meta-card">
+      <div class="run-card-header">
+        <h3>${escapeHtml(jobTitle)}</h3>
+        <span class="badge badge-${escapeHtml(normalizeStatus(selectedRun.status))}">${escapeHtml(selectedRun.status)}</span>
+      </div>
+      <p>${escapeHtml(jobCompany)}</p>
+      <p>${escapeHtml(currentUrl || "Current URL not available yet")}</p>
+      <p>Updated ${escapeHtml(formatDate(selectedRun.updated_at, true))}</p>
+      ${notes ? `<p>${escapeHtml(`Notes: ${notes}`)}</p>` : ""}
+      ${selectedRun.error_message ? `<p class="job-meta review-warning">${escapeHtml(selectedRun.error_message)}</p>` : ""}
+    </div>
+  `;
+
+  if (screenshotEntries.length) {
+    els.logCheckpointList.innerHTML = screenshotEntries
+      .map((entry, index) => {
+        const active = selectedScreenshot?.index === index ? "is-active" : "";
+        return `
+          <button class="log-checkpoint-button ${active}" type="button" data-log-screenshot="${escapeHtml(String(index))}">
+            <strong>${escapeHtml(entry.reason || `Checkpoint ${index + 1}`)}</strong>
+            <span>${escapeHtml(formatDateTime(entry.captured_at || selectedRun.updated_at))}</span>
+          </button>
+        `;
+      })
+      .join("");
+    els.logCheckpointList.querySelectorAll("[data-log-screenshot]").forEach((button) => {
+      button.addEventListener("click", () => {
+        selectLogScreenshot(Number(button.dataset.logScreenshot));
+      });
+    });
+  } else {
+    els.logCheckpointList.innerHTML = `<div class="empty-state">No timed checkpoints have been captured for this run yet.</div>`;
+  }
+
+  const screenshotUrl = selectedScreenshot ? getLogScreenshotUrl(selectedRun, selectedScreenshot.index) : getReviewScreenshotUrl(selectedRun);
+  if (selectedScreenshot || selectedRun.artifacts?.latest_screenshot) {
+    els.logScreenshot.hidden = false;
+    els.logScreenshotEmpty.hidden = true;
+    els.logScreenshot.src = screenshotUrl;
+    els.openLogScreenshotLink.hidden = false;
+    els.openLogScreenshotLink.href = screenshotUrl;
+  } else {
+    els.logScreenshot.hidden = true;
+    els.logScreenshotEmpty.hidden = false;
+    els.logScreenshot.removeAttribute("src");
+    els.openLogScreenshotLink.hidden = true;
+    els.openLogScreenshotLink.href = "#";
+  }
+
+  els.openLogJobLink.hidden = !job?.url;
+  els.openLogJobLink.href = job?.url || "#";
+
+  const decisions = Array.isArray(selectedRun.decisions) ? selectedRun.decisions : [];
+  if (!decisions.length) {
+    els.logTimeline.innerHTML = `<div class="empty-state">No log entries have been recorded for this run yet.</div>`;
+    return;
+  }
+
+  els.logTimeline.innerHTML = decisions
+    .map((entry) => {
+      const headlineParts = [entry.source || "system", entry.action || "event", entry.target || null].filter(Boolean);
+      const detail = entry.note || entry.value || "No additional detail recorded.";
+      return `
+        <article class="log-entry">
+          <div class="log-entry-header">
+            <strong>${escapeHtml(headlineParts.join(" · "))}</strong>
+            <span class="job-meta">${escapeHtml(formatDateTime(entry.logged_at || selectedRun.updated_at))}</span>
+          </div>
+          <p>${escapeHtml(detail)}</p>
+        </article>
+      `;
+    })
+    .join("");
 }
 
 function renderReviewDesk() {
@@ -1117,6 +1275,14 @@ function renderPagination() {
   els.nextPageButton.disabled = page >= totalPages;
 }
 
+function syncSelectedLogRun() {
+  const logRuns = getLogRuns();
+  if (!logRuns.some((run) => run.id === state.selectedLogRunId)) {
+    state.selectedLogRunId = logRuns.find((run) => ["queued", "running", "submitting"].includes(normalizeStatus(run.status)))?.id || logRuns[0]?.id || null;
+    state.selectedLogScreenshotIndex = null;
+  }
+}
+
 function syncSelectedReviewRun() {
   const reviewRuns = getReviewRuns();
   if (!reviewRuns.some((run) => run.id === state.selectedReviewRunId)) {
@@ -1126,6 +1292,17 @@ function syncSelectedReviewRun() {
     const selectedRun = reviewRuns.find((run) => run.id === state.selectedReviewRunId);
     state.reviewNotesDrafts[state.selectedReviewRunId] = selectedRun?.pending_review?.notes ?? "";
   }
+}
+
+function selectLogRun(runId) {
+  state.selectedLogRunId = runId;
+  state.selectedLogScreenshotIndex = null;
+  renderDashboard();
+}
+
+function selectLogScreenshot(index) {
+  state.selectedLogScreenshotIndex = Number.isFinite(index) ? index : null;
+  renderDashboard();
 }
 
 function selectReviewRun(runId) {
@@ -1196,6 +1373,14 @@ function getLatestRunMap() {
   return latestByJob;
 }
 
+function getLogRuns() {
+  return [...state.runs].sort((left, right) => new Date(right.updated_at) - new Date(left.updated_at));
+}
+
+function getSelectedLogRun() {
+  return getLogRuns().find((run) => run.id === state.selectedLogRunId) || null;
+}
+
 function getReviewRuns() {
   return [...state.runs]
     .filter((run) => normalizeStatus(run.status) === "review")
@@ -1204,6 +1389,25 @@ function getReviewRuns() {
 
 function getSelectedReviewRun() {
   return getReviewRuns().find((run) => run.id === state.selectedReviewRunId) || null;
+}
+
+function getLogScreenshotEntries(run) {
+  return Array.isArray(run?.artifacts?.progress_screenshots) ? run.artifacts.progress_screenshots : [];
+}
+
+function getSelectedLogScreenshot(run, screenshotEntries = getLogScreenshotEntries(run)) {
+  if (!screenshotEntries.length) {
+    return null;
+  }
+  if (
+    state.selectedLogScreenshotIndex !== null &&
+    state.selectedLogScreenshotIndex >= 0 &&
+    state.selectedLogScreenshotIndex < screenshotEntries.length
+  ) {
+    return { ...screenshotEntries[state.selectedLogScreenshotIndex], index: state.selectedLogScreenshotIndex };
+  }
+  const lastIndex = screenshotEntries.length - 1;
+  return { ...screenshotEntries[lastIndex], index: lastIndex };
 }
 
 function getOutstandingReviewQuestions(run, fields) {
@@ -1252,6 +1456,10 @@ function formatReviewRunLabel(run) {
   const title = job?.title || run.result?.page_title || run.job_id;
   const company = job?.company || run.result?.company || "Unknown company";
   return `${title} · ${company} · ${formatDate(run.updated_at, true)}`;
+}
+
+function getLogScreenshotUrl(run, screenshotIndex) {
+  return `/runs/${encodeURIComponent(run.id)}/progress-screenshots/${encodeURIComponent(screenshotIndex)}?v=${encodeURIComponent(run.updated_at || run.id)}`;
 }
 
 function getReviewResumeUrl(run) {
@@ -1395,6 +1603,23 @@ function formatDate(value, compact = false) {
     day: "numeric",
     hour: compact ? "numeric" : undefined,
     minute: compact ? "2-digit" : undefined,
+  }).format(date);
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "Unknown";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Unknown";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
   }).format(date);
 }
 

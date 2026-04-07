@@ -284,6 +284,58 @@
             </div>
           </section>
 
+          <section id="logDeskSection" class="card log-card">
+            <div class="review-header">
+              <div>
+                <p class="panel-kicker">Run Console</p>
+                <h2>Submission Logs</h2>
+                <p id="logSummary" class="jobs-summary">No runs available.</p>
+              </div>
+              <div class="review-selector">
+                <label class="field-label" for="logRunSelect">Run</label>
+                <select id="logRunSelect" class="select"></select>
+              </div>
+            </div>
+
+            <div id="logEmptyState" class="empty-state">No runs available for the selected profile.</div>
+
+            <div id="logContent" class="review-content" hidden>
+              <div class="review-actions-bar">
+                <div id="logMeta" class="review-meta log-meta"></div>
+                <div class="review-buttons">
+                  <a id="openLogJobLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open job</a>
+                  <a id="openLogScreenshotLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open screenshot</a>
+                </div>
+              </div>
+
+              <div class="review-grid">
+                <section class="review-panel">
+                  <div class="review-panel-header">
+                    <div>
+                      <h3>Checkpoint Screenshots</h3>
+                      <p class="job-meta">Captured while the run is active, on a 10-second checkpoint cadence.</p>
+                    </div>
+                  </div>
+                  <div id="logCheckpointList" class="log-checkpoint-list"></div>
+                  <div class="review-screenshot-shell">
+                    <img id="logScreenshot" class="review-screenshot" alt="Run progress screenshot" />
+                    <div id="logScreenshotEmpty" class="empty-state">No screenshots captured for this run yet.</div>
+                  </div>
+                </section>
+
+                <section class="review-panel">
+                  <div class="review-panel-header">
+                    <div>
+                      <h3>Detailed Log</h3>
+                      <p class="job-meta">Actions, planner steps, autofill notes, and submission checkpoints.</p>
+                    </div>
+                  </div>
+                  <div id="logTimeline" class="log-timeline"></div>
+                </section>
+              </div>
+            </div>
+          </section>
+
           <section id="reviewDeskSection" class="card review-card">
             <div class="review-header">
               <div>

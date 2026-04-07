@@ -56,6 +56,16 @@ def _get_review_screenshot_path(run: Run) -> Path:
     return _resolve_storage_file(screenshot_path)
 
 
+def _get_progress_screenshot_path(run: Run, screenshot_index: int) -> Path:
+    screenshots = (run.artifacts or {}).get("progress_screenshots") or []
+    if screenshot_index < 0 or screenshot_index >= len(screenshots):
+        raise HTTPException(status_code=404, detail="Progress screenshot not found.")
+    screenshot_path = screenshots[screenshot_index].get("path")
+    if not screenshot_path:
+        raise HTTPException(status_code=404, detail="Progress screenshot path not available.")
+    return _resolve_storage_file(screenshot_path)
+
+
 def _serialize_run(run: Run) -> RunRead:
     return RunRead(
         id=run.id,
@@ -118,6 +128,19 @@ def get_review_screenshot(run_id: str, session: Session = Depends(get_session)) 
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
     screenshot_path = _get_review_screenshot_path(run)
+    return FileResponse(
+        screenshot_path,
+        media_type="image/png",
+        headers={"Content-Disposition": f'inline; filename="{screenshot_path.name}"'},
+    )
+
+
+@router.get("/{run_id}/progress-screenshots/{screenshot_index}")
+def get_progress_screenshot(run_id: str, screenshot_index: int, session: Session = Depends(get_session)) -> FileResponse:
+    run = session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    screenshot_path = _get_progress_screenshot_path(run, screenshot_index)
     return FileResponse(
         screenshot_path,
         media_type="image/png",
