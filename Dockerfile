@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /srv/job-agent
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl fluxbox novnc websockify x11vnc xvfb \
+    && apt-get install -y --no-install-recommends curl fluxbox novnc python3-venv websockify x11vnc xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv "$VIRTUAL_ENV"
