@@ -46,6 +46,19 @@ def extract_pdf_text(path: Path) -> str:
     return "\n".join(page.strip() for page in pages if page.strip()).strip()
 
 
+def hydrate_profile_resume(
+    profile_data: dict[str, Any],
+    *,
+    resume_path: str | None = None,
+) -> dict[str, Any]:
+    hydrated = deepcopy(profile_data)
+    documents = dict(hydrated.get("documents", {}))
+    if resume_path and not documents.get("resume_pdf"):
+        documents["resume_pdf"] = resume_path
+    hydrated["documents"] = documents
+    return hydrated
+
+
 def load_resume_source(profile_data: dict[str, Any]) -> tuple[str, str]:
     documents = dict(profile_data.get("documents", {}))
     candidates = [

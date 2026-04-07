@@ -24,7 +24,12 @@ SAFE_KEYWORDS = {
     "phone",
     "phone number",
     "location",
+    "located",
+    "country",
+    "city",
+    "state",
     "linkedin",
+    "linkedin profile",
     "github",
     "portfolio",
     "website",
@@ -40,14 +45,28 @@ SAFE_KEYWORDS = {
 SUBMIT_KEYWORDS = {"submit", "send application", "finish application", "review and submit"}
 
 
+def normalize_text(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
 def is_sensitive_label(label: str) -> bool:
-    lowered = label.lower()
+    lowered = normalize_text(label)
     return any(keyword in lowered for keyword in SENSITIVE_KEYWORDS)
 
 
+def is_safe_text(label: str | None) -> bool:
+    lowered = normalize_text(label)
+    return bool(lowered) and any(keyword in lowered for keyword in SAFE_KEYWORDS) and not is_sensitive_label(lowered)
+
+
 def is_safe_field(field: ExtractedField) -> bool:
-    lowered = field.label.lower()
-    return any(keyword in lowered for keyword in SAFE_KEYWORDS) and not is_sensitive_label(lowered)
+    candidates = [
+        field.label,
+        field.name,
+        field.placeholder,
+        field.selector,
+    ]
+    return any(is_safe_text(candidate) for candidate in candidates)
 
 
 def should_stop_for_review(page_state: PageState) -> bool:

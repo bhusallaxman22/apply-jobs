@@ -10,9 +10,10 @@ from app.answer_bank import normalize_prompt
 from app.config import get_settings
 from app.db import get_session
 from app.models import AnswerEntry, Profile
-from app.resume_customizer import create_resume_variant, extract_pdf_text
+from app.resume_customizer import create_resume_variant, extract_pdf_text, hydrate_profile_resume
 from app.schemas import (
     AnswerEntryCreate,
+    AnswerEntryUpdate,
     ProfileCreate,
     ProfileRead,
     ProfileUpdate,
@@ -136,6 +137,62 @@ def add_profile_answer(
     return _serialize_profile(profile)
 
 
+@router.put("/{profile_id}/answers/{answer_id}", response_model=ProfileRead)
+def update_profile_answer(
+    profile_id: str,
+    answer_id: str,
+    payload: AnswerEntryUpdate,
+    session: Session = Depends(get_session),
+) -> ProfileRead:
+    profile = _profile_query(session).filter(Profile.id == profile_id).one_or_none()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    answer = (
+        session.query(AnswerEntry)
+        .filter(AnswerEntry.id == answer_id, AnswerEntry.profile_id == profile.id)
+        .one_or_none()
+    )
+    if answer is None:
+        raise HTTPException(status_code=404, detail="Answer entry not found.")
+
+    if payload.prompt is not None:
+        answer.prompt = payload.prompt
+        answer.normalized_prompt = normalize_prompt(payload.prompt)
+    if payload.answer is not None:
+        answer.answer = payload.answer
+    if payload.safe_to_autofill is not None:
+        answer.safe_to_autofill = payload.safe_to_autofill
+
+    session.commit()
+    profile = _profile_query(session).filter(Profile.id == profile.id).one()
+    return _serialize_profile(profile)
+
+
+@router.delete("/{profile_id}/answers/{answer_id}", response_model=ProfileRead)
+def delete_profile_answer(
+    profile_id: str,
+    answer_id: str,
+    session: Session = Depends(get_session),
+) -> ProfileRead:
+    profile = _profile_query(session).filter(Profile.id == profile_id).one_or_none()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+
+    answer = (
+        session.query(AnswerEntry)
+        .filter(AnswerEntry.id == answer_id, AnswerEntry.profile_id == profile.id)
+        .one_or_none()
+    )
+    if answer is None:
+        raise HTTPException(status_code=404, detail="Answer entry not found.")
+
+    session.delete(answer)
+    session.commit()
+    profile = _profile_query(session).filter(Profile.id == profile.id).one()
+    return _serialize_profile(profile)
+
+
 @router.post("/{profile_id}/resume", response_model=ProfileRead)
 def upload_resume(
     profile_id: str,
@@ -199,6 +256,6 @@ async def customize_resume(
         raise HTTPException(status_code=404, detail="Profile not found.")
     return await create_resume_variant(
         profile_id=profile.id,
-        profile_data=profile.data,
+        profile_data=hydrate_profile_resume(profile.data, resume_path=profile.resume_path),
         job_request=payload,
     )

@@ -14,7 +14,7 @@ from app.agent.safety import should_stop_for_review
 from app.config import get_settings
 from app.db import session_scope
 from app.models import Job, Profile, Run
-from app.resume_customizer import ResumeCustomizationError, create_resume_variant
+from app.resume_customizer import ResumeCustomizationError, create_resume_variant, hydrate_profile_resume
 from app.schemas import ResumeCustomizeRequest
 from app.site_adapters import get_adapter
 
@@ -91,7 +91,10 @@ async def execute_run(run_id: str) -> None:
         job_title = job.title
         job_description = job.description
         profile_id = profile.id
-        profile_data = dict(profile.data or {})
+        profile_data = hydrate_profile_resume(
+            dict(profile.data or {}),
+            resume_path=profile.resume_path,
+        )
         answer_entries = list(profile.answers)
 
     trace_path = _artifact_path(settings.traces_path, run_id, "trace.zip")

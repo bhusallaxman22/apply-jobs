@@ -13,8 +13,12 @@ FIELD_MAP = {
     "email": "identity.email",
     "phone": "identity.phone",
     "phone number": "identity.phone",
+    "country": "identity.country",
     "location": "identity.location",
+    "where are you located": "identity.location",
+    "current location": "identity.location",
     "linkedin": "identity.linkedin",
+    "linkedin profile": "identity.linkedin",
     "github": "identity.github",
     "portfolio": "identity.portfolio",
     "website": "identity.portfolio",
@@ -56,6 +60,20 @@ def _split_name(full_name: str) -> tuple[str | None, str | None]:
     return pieces[0], " ".join(pieces[1:])
 
 
+def _derive_country(profile_data: dict[str, Any]) -> str | None:
+    explicit_country = _get_nested(profile_data, "identity.country")
+    if isinstance(explicit_country, str) and explicit_country.strip():
+        return explicit_country.strip()
+
+    location = _get_nested(profile_data, "identity.location")
+    if not isinstance(location, str):
+        return None
+    parts = [part.strip() for part in location.split(",") if part.strip()]
+    if not parts:
+        return None
+    return parts[-1]
+
+
 def lookup_profile_value(label: str, profile_data: dict[str, Any], min_score: int = 88) -> tuple[str | None, Any]:
     normalized = normalize_label(label)
     if normalized in FIELD_MAP:
@@ -63,6 +81,11 @@ def lookup_profile_value(label: str, profile_data: dict[str, Any], min_score: in
         value = _get_nested(profile_data, path)
         if value is not None:
             return path, value
+
+    if normalized == "country":
+        derived_country = _derive_country(profile_data)
+        if derived_country:
+            return "identity.country", derived_country
 
     if normalized in {"first name", "last name"}:
         full_name = _get_nested(profile_data, "identity.full_name")

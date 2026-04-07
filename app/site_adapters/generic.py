@@ -50,7 +50,7 @@ class GenericAdapter:
                 )
                 continue
 
-            profile_path, profile_value = lookup_profile_value(field.label, profile_data)
+            profile_path, profile_value = lookup_profile_value_for_field(field, profile_data)
             if profile_value is not None and is_safe_field(field):
                 try:
                     await fill_field(page, field, profile_value)
@@ -114,3 +114,19 @@ class GenericAdapter:
 
         refreshed_fields = await self.extract_fields(page)
         return refreshed_fields, filled, skipped
+
+
+def lookup_profile_value_for_field(field: ExtractedField, profile_data: dict) -> tuple[str | None, object]:
+    candidates = [
+        field.label,
+        field.name,
+        field.placeholder,
+        field.selector,
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path, value = lookup_profile_value(candidate, profile_data)
+        if value is not None:
+            return path, value
+    return None, None

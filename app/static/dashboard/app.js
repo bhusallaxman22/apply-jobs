@@ -34,11 +34,19 @@ const els = {
   emailInput: document.getElementById("emailInput"),
   phoneInput: document.getElementById("phoneInput"),
   locationInput: document.getElementById("locationInput"),
+  countryInput: document.getElementById("countryInput"),
+  linkedinInput: document.getElementById("linkedinInput"),
   resumeFileInput: document.getElementById("resumeFileInput"),
   resumeMarkdownInput: document.getElementById("resumeMarkdownInput"),
   profilesCount: document.getElementById("profilesCount"),
   profileSelect: document.getElementById("profileSelect"),
   profileDetails: document.getElementById("profileDetails"),
+  answerBankCount: document.getElementById("answerBankCount"),
+  answerForm: document.getElementById("answerForm"),
+  answerPromptInput: document.getElementById("answerPromptInput"),
+  answerValueInput: document.getElementById("answerValueInput"),
+  answerSafeInput: document.getElementById("answerSafeInput"),
+  answerList: document.getElementById("answerList"),
   sourceForm: document.getElementById("sourceForm"),
   sourceUrlInput: document.getElementById("sourceUrlInput"),
   sourceNameInput: document.getElementById("sourceNameInput"),
@@ -95,6 +103,10 @@ function bindEvents() {
   els.profileForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await createProfileFromForm();
+  });
+  els.answerForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await createAnswerEntry();
   });
   els.profileSelect.addEventListener("change", async (event) => {
     state.selectedProfileId = event.target.value || null;
@@ -367,6 +379,8 @@ async function createProfileFromForm() {
         email: els.emailInput.value.trim(),
         phone: els.phoneInput.value.trim(),
         location: els.locationInput.value.trim(),
+        country: els.countryInput.value.trim(),
+        linkedin: els.linkedinInput.value.trim(),
       },
     },
     answers: [],
@@ -400,6 +414,84 @@ async function createProfileFromForm() {
   }
 }
 
+async function createAnswerEntry() {
+  const profile = getActiveProfile();
+  if (!profile) {
+    setBatchMessage("Choose a profile before adding answer-bank entries.", "warning");
+    return;
+  }
+
+  const prompt = els.answerPromptInput.value.trim();
+  const answer = els.answerValueInput.value.trim();
+  if (!prompt || !answer) {
+    setBatchMessage("Prompt and answer are required.", "warning");
+    return;
+  }
+
+  try {
+    setConnectionState("Saving answer bank entry…");
+    await fetchJson(`/profiles/${encodeURIComponent(profile.id)}/answers`, {
+      method: "POST",
+      body: JSON.stringify({
+        prompt,
+        answer,
+        safe_to_autofill: els.answerSafeInput.checked,
+      }),
+    });
+    els.answerForm.reset();
+    els.answerSafeInput.checked = true;
+    await loadDashboardData({ silent: true });
+    setBatchMessage("Answer bank entry saved.", "success");
+    setConnectionState("Answer bank updated");
+  } catch (error) {
+    setBatchMessage(getErrorMessage(error), "error");
+    setConnectionState("Saving answer failed");
+  }
+}
+
+async function updateAnswerEntry(answerId, payload) {
+  const profile = getActiveProfile();
+  if (!profile) {
+    setBatchMessage("Choose a profile before editing answer-bank entries.", "warning");
+    return;
+  }
+
+  try {
+    setConnectionState("Updating answer bank entry…");
+    await fetchJson(`/profiles/${encodeURIComponent(profile.id)}/answers/${encodeURIComponent(answerId)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    await loadDashboardData({ silent: true });
+    setBatchMessage("Answer bank entry updated.", "success");
+    setConnectionState("Answer bank updated");
+  } catch (error) {
+    setBatchMessage(getErrorMessage(error), "error");
+    setConnectionState("Updating answer failed");
+  }
+}
+
+async function deleteAnswerEntry(answerId) {
+  const profile = getActiveProfile();
+  if (!profile) {
+    setBatchMessage("Choose a profile before deleting answer-bank entries.", "warning");
+    return;
+  }
+
+  try {
+    setConnectionState("Deleting answer bank entry…");
+    await fetchJson(`/profiles/${encodeURIComponent(profile.id)}/answers/${encodeURIComponent(answerId)}`, {
+      method: "DELETE",
+    });
+    await loadDashboardData({ silent: true });
+    setBatchMessage("Answer bank entry deleted.", "success");
+    setConnectionState("Answer bank updated");
+  } catch (error) {
+    setBatchMessage(getErrorMessage(error), "error");
+    setConnectionState("Deleting answer failed");
+  }
+}
+
 async function syncSource(sourceId, { refreshAfter = true } = {}) {
   try {
     setConnectionState("Syncing source…");
@@ -416,6 +508,7 @@ async function syncSource(sourceId, { refreshAfter = true } = {}) {
 function renderDashboard() {
   clampPagination(getFilteredJobs().length);
   renderProfilePanel();
+  renderAnswerBank();
   renderSourceFilter();
   renderSources();
   renderStats();
@@ -463,6 +556,83 @@ function renderProfilePanel() {
       <p>${answersCount} saved answer${answersCount === 1 ? "" : "s"} available for autofill.</p>
     </div>
   `;
+}
+
+function renderAnswerBank() {
+  const profile = getActiveProfile();
+  const answers = [...(profile?.answers || [])].sort((left, right) => new Date(right.updated_at) - new Date(left.updated_at));
+  els.answerBankCount.textContent = `${answers.length} entr${answers.length === 1 ? "y" : "ies"}`;
+
+  els.answerForm.querySelectorAll("input, textarea, button").forEach((element) => {
+    element.disabled = !profile;
+  });
+
+  if (!profile) {
+    els.answerList.className = "answer-list empty-state";
+    els.answerList.textContent = "Choose a profile to manage saved answers.";
+    return;
+  }
+
+  if (!answers.length) {
+    els.answerList.className = "answer-list empty-state";
+    els.answerList.textContent = "No saved answers yet. Add responses for long-form questions here.";
+    return;
+  }
+
+  els.answerList.className = "answer-list";
+  els.answerList.innerHTML = answers
+    .map(
+      (entry) => `
+        <article class="answer-card" data-answer-id="${escapeHtml(entry.id)}">
+          <div class="answer-card-header">
+            <span class="badge badge-${entry.safe_to_autofill ? "approved" : "review"}">
+              ${escapeHtml(entry.safe_to_autofill ? "safe" : "review")}
+            </span>
+            <span class="job-meta">Updated ${escapeHtml(formatDate(entry.updated_at, true))}</span>
+          </div>
+          <label class="field-label" for="answer-prompt-${escapeHtml(entry.id)}">Prompt</label>
+          <textarea id="answer-prompt-${escapeHtml(entry.id)}" class="input answer-textarea" data-answer-field="prompt">${escapeHtml(entry.prompt)}</textarea>
+          <label class="field-label" for="answer-value-${escapeHtml(entry.id)}">Answer</label>
+          <textarea id="answer-value-${escapeHtml(entry.id)}" class="input answer-textarea answer-textarea-large" data-answer-field="answer">${escapeHtml(entry.answer)}</textarea>
+          <label class="checkbox-row">
+            <input type="checkbox" data-answer-field="safe" ${entry.safe_to_autofill ? "checked" : ""} />
+            <span>Allow safe autofill</span>
+          </label>
+          <div class="answer-card-actions">
+            <button class="button button-secondary small-button" type="button" data-answer-save="${escapeHtml(entry.id)}">Save</button>
+            <button class="button button-secondary small-button danger-button" type="button" data-answer-delete="${escapeHtml(entry.id)}">Delete</button>
+          </div>
+        </article>
+      `,
+    )
+    .join("");
+
+  els.answerList.querySelectorAll("[data-answer-save]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const card = button.closest("[data-answer-id]");
+      if (!card) {
+        return;
+      }
+      const prompt = card.querySelector('[data-answer-field="prompt"]').value.trim();
+      const answer = card.querySelector('[data-answer-field="answer"]').value.trim();
+      const safeToAutofill = card.querySelector('[data-answer-field="safe"]').checked;
+      if (!prompt || !answer) {
+        setBatchMessage("Prompt and answer are required.", "warning");
+        return;
+      }
+      await updateAnswerEntry(button.dataset.answerSave, {
+        prompt,
+        answer,
+        safe_to_autofill: safeToAutofill,
+      });
+    });
+  });
+
+  els.answerList.querySelectorAll("[data-answer-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await deleteAnswerEntry(button.dataset.answerDelete);
+    });
+  });
 }
 
 function renderSourceFilter() {
@@ -759,6 +929,7 @@ function renderReviewDesk() {
   const jobUrl = job?.url || finalUrl || "";
   const screenshotUrl = hasReviewScreenshot(selectedRun) ? getReviewScreenshotUrl(selectedRun) : "";
   const resumeUrl = tailoredResume?.pdf_path ? getReviewResumeUrl(selectedRun) : "";
+  const resumeDecisionNote = getResumeDecisionNote(selectedRun);
 
   els.reviewNotesInput.value = notes;
   els.reviewMeta.innerHTML = `
@@ -770,6 +941,7 @@ function renderReviewDesk() {
       <p>${escapeHtml(jobCompany)}</p>
       <p>${escapeHtml(finalUrl || "Final review URL not available")}</p>
       <p>Updated ${escapeHtml(formatDate(selectedRun.updated_at, true))}</p>
+      <p>${escapeHtml(resumeDecisionNote || "Tailored resume generation status not recorded.")}</p>
     </div>
   `;
 
@@ -972,6 +1144,12 @@ function getReviewScreenshotUrl(run) {
 
 function hasReviewScreenshot(run) {
   return Boolean(run.artifacts?.latest_screenshot);
+}
+
+function getResumeDecisionNote(run) {
+  const decisions = Array.isArray(run.decisions) ? run.decisions : [];
+  const decision = decisions.find((entry) => entry && entry.source === "resume_customizer");
+  return decision?.note || null;
 }
 
 function getPaginationMeta(totalItems = getFilteredJobs().length) {

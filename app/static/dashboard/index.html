@@ -53,6 +53,14 @@
                   <label class="field-label" for="locationInput">Location</label>
                   <input id="locationInput" name="location" class="input" type="text" placeholder="Euless, TX, USA" />
                 </div>
+                <div>
+                  <label class="field-label" for="countryInput">Country</label>
+                  <input id="countryInput" name="country" class="input" type="text" placeholder="United States" />
+                </div>
+                <div>
+                  <label class="field-label" for="linkedinInput">LinkedIn</label>
+                  <input id="linkedinInput" name="linkedin" class="input" type="url" placeholder="https://linkedin.com/in/yourprofile" />
+                </div>
               </div>
 
               <div class="form-grid">
@@ -81,6 +89,47 @@
             <label class="field-label" for="profileSelect">Resume profile</label>
             <select id="profileSelect" class="select"></select>
             <div id="profileDetails" class="profile-details empty-state">No profiles found yet.</div>
+          </section>
+
+          <section class="panel card">
+            <div class="panel-header">
+              <div>
+                <p class="panel-kicker">Answers</p>
+                <h2>Answer Bank</h2>
+              </div>
+              <span id="answerBankCount" class="meta-chip">0 entries</span>
+            </div>
+
+            <form id="answerForm" class="answer-form">
+              <div>
+                <label class="field-label" for="answerPromptInput">Prompt</label>
+                <textarea
+                  id="answerPromptInput"
+                  class="input answer-textarea"
+                  placeholder="Why do you want to work at Speechify?"
+                  required
+                ></textarea>
+              </div>
+
+              <div>
+                <label class="field-label" for="answerValueInput">Answer</label>
+                <textarea
+                  id="answerValueInput"
+                  class="input answer-textarea answer-textarea-large"
+                  placeholder="Saved response used for safe autofill."
+                  required
+                ></textarea>
+              </div>
+
+              <label class="checkbox-row">
+                <input id="answerSafeInput" type="checkbox" checked />
+                <span>Allow safe autofill</span>
+              </label>
+
+              <button id="createAnswerButton" class="button button-primary" type="submit">Add answer</button>
+            </form>
+
+            <div id="answerList" class="answer-list empty-state">Choose a profile to manage saved answers.</div>
           </section>
 
           <section class="panel card">

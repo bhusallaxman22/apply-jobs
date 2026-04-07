@@ -12,6 +12,12 @@ class AnswerEntryCreate(BaseModel):
     safe_to_autofill: bool = True
 
 
+class AnswerEntryUpdate(BaseModel):
+    prompt: str | None = None
+    answer: str | None = None
+    safe_to_autofill: bool | None = None
+
+
 class AnswerEntryRead(AnswerEntryCreate):
     id: str
     created_at: datetime
