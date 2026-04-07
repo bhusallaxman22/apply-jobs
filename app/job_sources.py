@@ -60,13 +60,18 @@ def extract_source_token(*, platform: str, source_url: str | None, source_token:
         raise JobSourceError("source_url is required when source_token is not provided.")
 
     parsed = urlparse(source_url)
+    hostname = (parsed.hostname or "").lower()
     path_parts = [part for part in parsed.path.split("/") if part]
     if not path_parts:
         raise JobSourceError(f"Could not determine source token from URL: {source_url}")
 
     if platform == "greenhouse":
+        if hostname == "boards-api.greenhouse.io" and len(path_parts) >= 3 and path_parts[:2] == ["v1", "boards"]:
+            return path_parts[2]
         return path_parts[0]
     if platform == "lever":
+        if hostname == "api.lever.co" and len(path_parts) >= 3 and path_parts[:2] == ["v0", "postings"]:
+            return path_parts[2]
         return path_parts[0]
     raise JobSourceError(f"Unsupported platform for token extraction: {platform}")
 
@@ -230,7 +235,24 @@ async def create_or_get_source(session: Session, payload: JobSourceCreate) -> Jo
         .one_or_none()
     )
     if existing is not None:
+        if payload.name:
+            existing.name = payload.name
+        if payload.source_url:
+            existing.source_url = payload.source_url
         return existing
+
+    existing_by_url = None
+    if payload.source_url:
+        existing_by_url = (
+            session.query(JobSource)
+            .filter(JobSource.platform == platform, JobSource.source_url == payload.source_url)
+            .one_or_none()
+        )
+    if existing_by_url is not None:
+        existing_by_url.source_token = token
+        if payload.name:
+            existing_by_url.name = payload.name
+        return existing_by_url
 
     source = JobSource(
         name=payload.name or token,
