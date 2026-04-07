@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /srv/job-agent
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl fluxbox novnc websockify x11vnc xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -14,10 +14,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app /srv/job-agent/app
+COPY docker/start.sh /srv/job-agent/docker/start.sh
 
-EXPOSE 8095
+RUN chmod +x /srv/job-agent/docker/start.sh
+
+EXPOSE 8095 7900
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
   CMD curl -fsS http://127.0.0.1:8095/health || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8095"]
+CMD ["/srv/job-agent/docker/start.sh"]

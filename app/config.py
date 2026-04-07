@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     navigation_timeout_ms: int = 45_000
     slow_mo_ms: int = 0
+    browser_desktop_enabled: bool = False
+    browser_desktop_port: int = 7900
+    browser_desktop_public_url: str | None = None
+    captcha_wait_timeout_seconds: int = 900
 
     model_config = SettingsConfigDict(
         env_file=".env",

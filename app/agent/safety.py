@@ -16,6 +16,11 @@ SENSITIVE_KEYWORDS = {
     "age",
 }
 
+EXPLICIT_PROFILE_PREFIXES = (
+    "application_preferences.",
+    "eeo.",
+)
+
 SAFE_KEYWORDS = {
     "first name",
     "last name",
@@ -49,9 +54,24 @@ def normalize_text(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
-def is_sensitive_label(label: str) -> bool:
+def is_sensitive_label(label: str | None) -> bool:
     lowered = normalize_text(label)
     return any(keyword in lowered for keyword in SENSITIVE_KEYWORDS)
+
+
+def is_sensitive_field(field: ExtractedField) -> bool:
+    candidates = [
+        field.label,
+        field.name,
+        field.placeholder,
+        field.selector,
+    ]
+    return any(is_sensitive_label(candidate) for candidate in candidates)
+
+
+def is_explicit_profile_path(path: str | None) -> bool:
+    lowered = normalize_text(path)
+    return any(lowered.startswith(prefix) for prefix in EXPLICIT_PROFILE_PREFIXES)
 
 
 def is_safe_text(label: str | None) -> bool:

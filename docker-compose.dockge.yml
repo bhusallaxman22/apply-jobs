@@ -11,6 +11,7 @@ services:
         condition: service_healthy
     ports:
       - "${JOB_AGENT_PORT:-8095}:8095"
+      - "${BROWSER_DESKTOP_PORT:-7900}:7900"
     environment:
       APP_ENV: ${APP_ENV:-prod}
       HOST: 0.0.0.0
@@ -24,6 +25,11 @@ services:
       REQUIRE_HUMAN_APPROVAL: ${REQUIRE_HUMAN_APPROVAL:-true}
       NAVIGATION_TIMEOUT_MS: ${NAVIGATION_TIMEOUT_MS:-45000}
       MAX_AGENT_STEPS: ${MAX_AGENT_STEPS:-15}
+      BROWSER_DESKTOP_ENABLED: ${BROWSER_DESKTOP_ENABLED:-false}
+      BROWSER_DESKTOP_PORT: ${BROWSER_DESKTOP_PORT:-7900}
+      BROWSER_DESKTOP_PUBLIC_URL: ${BROWSER_DESKTOP_PUBLIC_URL:-}
+      BROWSER_DESKTOP_PASSWORD: ${BROWSER_DESKTOP_PASSWORD:-}
+      CAPTCHA_WAIT_TIMEOUT_SECONDS: ${CAPTCHA_WAIT_TIMEOUT_SECONDS:-900}
     volumes:
       - ${JOB_AGENT_DATA_DIR:-/mnt/mainpool/apps/job-agent/data}:/data
     healthcheck:

@@ -74,6 +74,67 @@
                 </div>
               </div>
 
+              <div class="form-grid">
+                <div>
+                  <label class="field-label" for="currentEmployeeInput">Already employed here</label>
+                  <select id="currentEmployeeInput" name="current_employee" class="select">
+                    <option value="No" selected>No</option>
+                    <option value="Yes">Yes</option>
+                    <option value="">Leave blank</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="genderInput">Gender</label>
+                  <select id="genderInput" name="gender" class="select">
+                    <option value="Male" selected>Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Non-binary">Non-binary</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                    <option value="">Leave blank</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="hispanicInput">Hispanic / Latino</label>
+                  <select id="hispanicInput" name="hispanic_latino" class="select">
+                    <option value="No - Not Hispanic or Latino" selected>No - Not Hispanic or Latino</option>
+                    <option value="Yes - Hispanic or Latino">Yes - Hispanic or Latino</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                    <option value="">Leave blank</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="ethnicityInput">Ethnicity</label>
+                  <select id="ethnicityInput" name="ethnicity" class="select">
+                    <option value="Asian" selected>Asian</option>
+                    <option value="White">White</option>
+                    <option value="Black or African American">Black or African American</option>
+                    <option value="American Indian or Alaska Native">American Indian or Alaska Native</option>
+                    <option value="Native Hawaiian or Other Pacific Islander">Native Hawaiian or Other Pacific Islander</option>
+                    <option value="Two or more races">Two or more races</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                    <option value="">Leave blank</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="veteranInput">Veteran status</label>
+                  <select id="veteranInput" name="veteran_status" class="select">
+                    <option value="">Leave blank</option>
+                    <option value="I am not a protected veteran">I am not a protected veteran</option>
+                    <option value="I identify as one or more protected veteran classifications">Protected veteran</option>
+                    <option value="I do not wish to answer">Prefer not to say</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="disabilityInput">Disability status</label>
+                  <select id="disabilityInput" name="disability_status" class="select">
+                    <option value="">Leave blank</option>
+                    <option value="No, I do not have a disability and have not had one in the past">No disability</option>
+                    <option value="Yes, I have a disability, or have had one in the past">Yes</option>
+                    <option value="I do not want to answer">Prefer not to say</option>
+                  </select>
+                </div>
+              </div>
+
               <button id="createProfileButton" class="button button-primary" type="submit">Create profile</button>
             </form>
           </section>
@@ -89,6 +150,70 @@
             <label class="field-label" for="profileSelect">Resume profile</label>
             <select id="profileSelect" class="select"></select>
             <div id="profileDetails" class="profile-details empty-state">No profiles found yet.</div>
+            <form id="profileSettingsForm" class="profile-form">
+              <p class="job-meta">Only saved values here are allowed to autofill company employment and EEO questions.</p>
+              <div class="form-grid">
+                <div>
+                  <label class="field-label" for="profileCurrentEmployeeInput">Already employed here</label>
+                  <select id="profileCurrentEmployeeInput" class="select">
+                    <option value="No">No</option>
+                    <option value="Yes">Yes</option>
+                    <option value="">Leave blank</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="profileGenderInput">Gender</label>
+                  <select id="profileGenderInput" class="select">
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Non-binary">Non-binary</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                    <option value="">Leave blank</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="profileHispanicInput">Hispanic / Latino</label>
+                  <select id="profileHispanicInput" class="select">
+                    <option value="No - Not Hispanic or Latino">No - Not Hispanic or Latino</option>
+                    <option value="Yes - Hispanic or Latino">Yes - Hispanic or Latino</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                    <option value="">Leave blank</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="profileEthnicityInput">Ethnicity</label>
+                  <select id="profileEthnicityInput" class="select">
+                    <option value="Asian">Asian</option>
+                    <option value="White">White</option>
+                    <option value="Black or African American">Black or African American</option>
+                    <option value="American Indian or Alaska Native">American Indian or Alaska Native</option>
+                    <option value="Native Hawaiian or Other Pacific Islander">Native Hawaiian or Other Pacific Islander</option>
+                    <option value="Two or more races">Two or more races</option>
+                    <option value="Prefer not to say">Prefer not to say</option>
+                    <option value="">Leave blank</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="profileVeteranInput">Veteran status</label>
+                  <select id="profileVeteranInput" class="select">
+                    <option value="">Leave blank</option>
+                    <option value="I am not a protected veteran">I am not a protected veteran</option>
+                    <option value="I identify as one or more protected veteran classifications">Protected veteran</option>
+                    <option value="I do not wish to answer">Prefer not to say</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label" for="profileDisabilityInput">Disability status</label>
+                  <select id="profileDisabilityInput" class="select">
+                    <option value="">Leave blank</option>
+                    <option value="No, I do not have a disability and have not had one in the past">No disability</option>
+                    <option value="Yes, I have a disability, or have had one in the past">Yes</option>
+                    <option value="I do not want to answer">Prefer not to say</option>
+                  </select>
+                </div>
+              </div>
+              <button id="saveProfileSettingsButton" class="button button-secondary" type="submit">Save profile settings</button>
+            </form>
           </section>
 
           <section class="panel card">
@@ -218,6 +343,7 @@
                   <option value="queued">Queued</option>
                   <option value="running">Running</option>
                   <option value="submitting">Submitting</option>
+                  <option value="captcha_required">Captcha Required</option>
                   <option value="review">Review</option>
                   <option value="completed">Completed</option>
                   <option value="approved">Approved</option>
@@ -364,6 +490,7 @@
                 <div class="review-buttons">
                   <button id="approveReviewButton" class="button button-primary" type="button">Approve &amp; submit</button>
                   <button id="rejectReviewButton" class="button button-secondary" type="button">Reject</button>
+                  <a id="openReviewLiveBrowserLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open live browser</a>
                   <a id="openReviewJobLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open job</a>
                   <a id="openReviewResumeLink" class="button button-secondary link-button" href="#" target="_blank" rel="noreferrer">Open resume</a>
                 </div>

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from rapidfuzz import fuzz
+
 from app.schemas import ExtractedField
 
 
@@ -25,6 +27,36 @@ def _coerce_value(field: ExtractedField, value):
             return "Yes" if value else "No"
         return "Yes" if value else "No"
     return str(value)
+
+
+def _normalize_option_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _best_option_match(value: str, options: list[str]) -> str | None:
+    normalized_value = _normalize_option_text(value)
+    if not normalized_value:
+        return None
+
+    for option in options:
+        if _normalize_option_text(option) == normalized_value:
+            return option
+
+    for option in options:
+        normalized_option = _normalize_option_text(option)
+        if normalized_value in normalized_option or normalized_option in normalized_value:
+            return option
+
+    best_option: str | None = None
+    best_score = 0.0
+    for option in options:
+        score = fuzz.token_set_ratio(normalized_value, _normalize_option_text(option))
+        if score > best_score:
+            best_score = score
+            best_option = option
+    if best_score >= 70:
+        return best_option
+    return None
 
 
 async def resolve_locator(page, target: str):
@@ -65,9 +97,11 @@ async def type_target(page, target: str, value: str) -> None:
     await locator.fill(str(value), timeout=5_000)
 
 
-async def select_target(page, target: str, value: str) -> None:
+async def select_target(page, target: str, value: str, options: list[str] | None = None) -> None:
     locator = await resolve_locator(page, target)
     text_value = str(value)
+    if options:
+        text_value = _best_option_match(text_value, options) or text_value
     try:
         await locator.select_option(label=text_value, timeout=5_000)
     except Exception:
@@ -82,7 +116,7 @@ async def fill_field(page, field: ExtractedField, value) -> None:
     coerced_value = _coerce_value(field, value)
 
     if field.field_type == "select":
-        await select_target(page, target, coerced_value)
+        await select_target(page, target, coerced_value, field.options)
         return
 
     locator = await resolve_locator(page, target)

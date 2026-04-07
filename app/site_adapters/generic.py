@@ -5,7 +5,7 @@ from typing import Iterable
 
 from app.agent.actions import click_target, fill_field
 from app.agent.extractor import extract_form_schema
-from app.agent.safety import is_safe_field, is_sensitive_label
+from app.agent.safety import is_explicit_profile_path, is_safe_field, is_sensitive_field
 from app.answer_generator import AnswerGenerationError, generate_long_form_answer
 from app.answer_bank import best_answer_match
 from app.models import AnswerEntry
@@ -45,46 +45,60 @@ class GenericAdapter:
         skipped: list[dict] = []
 
         for field in fields:
-            if is_sensitive_label(field.label):
-                skipped.append(
-                    AgentDecision(
-                        action="skip",
-                        target=field.label,
-                        source=self.name,
-                        note="Sensitive question requires human review.",
-                    ).model_dump()
-                )
-                continue
-
+            field_is_sensitive = is_sensitive_field(field)
             profile_path, profile_value = lookup_profile_value_for_field(field, profile_data)
-            if profile_value is not None and is_safe_field(field):
+            explicit_profile_setting = is_explicit_profile_path(profile_path)
+            if profile_value is not None and (is_safe_field(field) or explicit_profile_setting):
                 try:
                     await fill_field(page, field, profile_value)
                     field.safe_to_autofill = True
                     field.profile_path = profile_path
+                    note = (
+                        f"Filled from explicit profile setting {profile_path}."
+                        if explicit_profile_setting
+                        else f"Mapped from {profile_path}."
+                    )
                     filled.append(
                         AgentDecision(
                             action="fill",
                             target=field.label,
                             value=str(profile_value),
                             source=self.name,
-                            note=f"Mapped from {profile_path}.",
+                            note=note,
                         ).model_dump()
                     )
+                    if explicit_profile_setting:
+                        logger.info("Explicitly configured field %r filled from %s.", field.label, profile_path)
                 except Exception as exc:
+                    failure_note = (
+                        f"Configured profile setting could not be applied automatically: {exc}"
+                        if explicit_profile_setting
+                        else f"Autofill failed and was deferred to review: {exc}"
+                    )
                     skipped.append(
                         AgentDecision(
                             action="skip",
                             target=field.label,
                             source=self.name,
-                            note=f"Autofill failed and was deferred to review: {exc}",
+                            note=failure_note,
                         ).model_dump()
                     )
                 continue
 
+            if field_is_sensitive:
+                skipped.append(
+                    AgentDecision(
+                        action="skip",
+                        target=field.label,
+                        source=self.name,
+                        note="Sensitive question requires an explicit saved profile setting or human review.",
+                    ).model_dump()
+                )
+                continue
+
             if field.field_type in {"textarea", "text"}:
                 answer = best_answer_match(field.label, answers)
-                if answer and answer.safe_to_autofill and not is_sensitive_label(field.label):
+                if answer and answer.safe_to_autofill and not field_is_sensitive:
                     try:
                         await fill_field(page, field, answer.answer)
                         field.safe_to_autofill = True

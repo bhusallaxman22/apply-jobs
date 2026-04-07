@@ -27,6 +27,15 @@ const state = {
   },
 };
 
+const PROFILE_SETTING_DEFAULTS = Object.freeze({
+  currentEmployee: "No",
+  gender: "Male",
+  hispanicLatino: "No - Not Hispanic or Latino",
+  ethnicity: "Asian",
+  veteranStatus: "",
+  disabilityStatus: "",
+});
+
 const els = {
   refreshButton: document.getElementById("refreshButton"),
   connectionPill: document.getElementById("connectionPill"),
@@ -40,9 +49,23 @@ const els = {
   linkedinInput: document.getElementById("linkedinInput"),
   resumeFileInput: document.getElementById("resumeFileInput"),
   resumeMarkdownInput: document.getElementById("resumeMarkdownInput"),
+  currentEmployeeInput: document.getElementById("currentEmployeeInput"),
+  genderInput: document.getElementById("genderInput"),
+  hispanicInput: document.getElementById("hispanicInput"),
+  ethnicityInput: document.getElementById("ethnicityInput"),
+  veteranInput: document.getElementById("veteranInput"),
+  disabilityInput: document.getElementById("disabilityInput"),
   profilesCount: document.getElementById("profilesCount"),
   profileSelect: document.getElementById("profileSelect"),
   profileDetails: document.getElementById("profileDetails"),
+  profileSettingsForm: document.getElementById("profileSettingsForm"),
+  profileCurrentEmployeeInput: document.getElementById("profileCurrentEmployeeInput"),
+  profileGenderInput: document.getElementById("profileGenderInput"),
+  profileHispanicInput: document.getElementById("profileHispanicInput"),
+  profileEthnicityInput: document.getElementById("profileEthnicityInput"),
+  profileVeteranInput: document.getElementById("profileVeteranInput"),
+  profileDisabilityInput: document.getElementById("profileDisabilityInput"),
+  saveProfileSettingsButton: document.getElementById("saveProfileSettingsButton"),
   answerBankCount: document.getElementById("answerBankCount"),
   answerForm: document.getElementById("answerForm"),
   answerPromptInput: document.getElementById("answerPromptInput"),
@@ -94,6 +117,7 @@ const els = {
   approveReviewButton: document.getElementById("approveReviewButton"),
   rejectReviewButton: document.getElementById("rejectReviewButton"),
   openReviewJobLink: document.getElementById("openReviewJobLink"),
+  openReviewLiveBrowserLink: document.getElementById("openReviewLiveBrowserLink"),
   openReviewResumeLink: document.getElementById("openReviewResumeLink"),
   openReviewScreenshotLink: document.getElementById("openReviewScreenshotLink"),
   reviewMeta: document.getElementById("reviewMeta"),
@@ -118,6 +142,10 @@ function bindEvents() {
   els.profileForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await createProfileFromForm();
+  });
+  els.profileSettingsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await saveActiveProfileSettings();
   });
   els.answerForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -362,24 +390,43 @@ async function submitReviewDecision(decision) {
     return;
   }
 
+  const runStatus = normalizeStatus(selectedRun.status);
+  const resumeCaptcha = runStatus === "captcha_required" && decision === "approve";
   const notes = els.reviewNotesInput.value.trim();
   state.reviewNotesDrafts[selectedRun.id] = notes;
 
   try {
-    setConnectionState(decision === "approve" ? "Starting approved submission..." : "Rejecting review...");
-    await fetchJson(`/runs/${encodeURIComponent(selectedRun.id)}/${decision}`, {
+    setConnectionState(
+      resumeCaptcha
+        ? "Signaling CAPTCHA resume..."
+        : decision === "approve"
+          ? "Starting approved submission..."
+          : "Rejecting review...",
+    );
+    const endpoint = resumeCaptcha
+      ? `/runs/${encodeURIComponent(selectedRun.id)}/captcha/resume`
+      : `/runs/${encodeURIComponent(selectedRun.id)}/${decision}`;
+    await fetchJson(endpoint, {
       method: "POST",
       body: JSON.stringify({ notes: notes || null }),
     });
     await loadRuns();
     renderDashboard();
     setBatchMessage(
-      decision === "approve"
-        ? "Review approved. Automatic submission started."
-        : "Review rejected. You can update the profile and queue again.",
-      decision === "approve" ? "success" : "warning",
+      resumeCaptcha
+        ? "Resume signal sent. Solve the challenge in the live browser, then wait for the run to continue."
+        : decision === "approve"
+          ? "Review approved. Automatic submission started."
+          : "Review rejected. You can update the profile and queue again.",
+      resumeCaptcha || decision === "approve" ? "success" : "warning",
     );
-    setConnectionState(decision === "approve" ? "Approved submission queued" : "Review rejected");
+    setConnectionState(
+      resumeCaptcha
+        ? "CAPTCHA resume requested"
+        : decision === "approve"
+          ? "Approved submission queued"
+          : "Review rejected",
+    );
   } catch (error) {
     setBatchMessage(getErrorMessage(error), "error");
     setConnectionState("Review decision failed");
@@ -395,16 +442,7 @@ async function createProfileFromForm() {
 
   const payload = {
     name: profileName,
-    data: {
-      identity: {
-        full_name: els.fullNameInput.value.trim(),
-        email: els.emailInput.value.trim(),
-        phone: els.phoneInput.value.trim(),
-        location: els.locationInput.value.trim(),
-        country: els.countryInput.value.trim(),
-        linkedin: els.linkedinInput.value.trim(),
-      },
-    },
+    data: buildCreatedProfileData(),
     answers: [],
   };
 
@@ -434,6 +472,66 @@ async function createProfileFromForm() {
     setBatchMessage(getErrorMessage(error), "error");
     setConnectionState("Profile creation failed");
   }
+}
+
+function buildCreatedProfileData() {
+  return (
+    pruneEmptyData({
+      identity: {
+        full_name: valueOrNull(els.fullNameInput.value),
+        email: valueOrNull(els.emailInput.value),
+        phone: valueOrNull(els.phoneInput.value),
+        location: valueOrNull(els.locationInput.value),
+        country: valueOrNull(els.countryInput.value),
+        linkedin: valueOrNull(els.linkedinInput.value),
+      },
+      application_preferences: {
+        current_employee: valueOrNull(els.currentEmployeeInput.value),
+      },
+      eeo: {
+        gender: valueOrNull(els.genderInput.value),
+        hispanic_latino: valueOrNull(els.hispanicInput.value),
+        ethnicity: valueOrNull(els.ethnicityInput.value),
+        veteran_status: valueOrNull(els.veteranInput.value),
+        disability_status: valueOrNull(els.disabilityInput.value),
+      },
+    }) || {}
+  );
+}
+
+async function saveActiveProfileSettings() {
+  const profile = getActiveProfile();
+  if (!profile) {
+    setBatchMessage("Choose a profile before saving profile settings.", "warning");
+    return;
+  }
+
+  try {
+    setConnectionState("Saving profile settings…");
+    await fetchJson(`/profiles/${encodeURIComponent(profile.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        data: buildUpdatedProfileData(profile.data),
+      }),
+    });
+    await loadDashboardData({ silent: true });
+    setBatchMessage("Profile settings saved.", "success");
+    setConnectionState("Profile settings updated");
+  } catch (error) {
+    setBatchMessage(getErrorMessage(error), "error");
+    setConnectionState("Saving profile settings failed");
+  }
+}
+
+function buildUpdatedProfileData(baseData = {}) {
+  const nextData = deepClone(baseData);
+  setNestedString(nextData, ["application_preferences", "current_employee"], valueOrNull(els.profileCurrentEmployeeInput.value));
+  setNestedString(nextData, ["eeo", "gender"], valueOrNull(els.profileGenderInput.value));
+  setNestedString(nextData, ["eeo", "hispanic_latino"], valueOrNull(els.profileHispanicInput.value));
+  setNestedString(nextData, ["eeo", "ethnicity"], valueOrNull(els.profileEthnicityInput.value));
+  setNestedString(nextData, ["eeo", "veteran_status"], valueOrNull(els.profileVeteranInput.value));
+  setNestedString(nextData, ["eeo", "disability_status"], valueOrNull(els.profileDisabilityInput.value));
+  return pruneEmptyData(nextData) || {};
 }
 
 async function createAnswerEntry() {
@@ -610,6 +708,8 @@ function renderProfilePanel() {
   if (!profile) {
     els.profileDetails.className = "profile-details empty-state";
     els.profileDetails.textContent = "Create a profile and upload a resume to enable applications.";
+    setProfileSettingsFormDisabled(true);
+    populateProfileSettingsForm();
     return;
   }
 
@@ -618,6 +718,7 @@ function renderProfilePanel() {
   const answersCount = Array.isArray(profile.answers) ? profile.answers.length : 0;
   const sourcePath = documents.resume_markdown_path || documents.resume_source_text_path || documents.resume_typst_path || "No source file";
   const resumePath = documents.resume_pdf || profile.resume_path || "No PDF uploaded";
+  const disclosureSummary = formatDisclosureSummary(profile.data);
 
   els.profileDetails.className = "profile-details";
   els.profileDetails.innerHTML = `
@@ -628,8 +729,11 @@ function renderProfilePanel() {
       <p class="mono-path">${escapeHtml(resumePath)}</p>
       <p class="mono-path">${escapeHtml(sourcePath)}</p>
       <p>${answersCount} saved answer${answersCount === 1 ? "" : "s"} available for autofill.</p>
+      <p>${escapeHtml(disclosureSummary)}</p>
     </div>
   `;
+  setProfileSettingsFormDisabled(false);
+  populateProfileSettingsForm(profile.data);
 }
 
 function renderAnswerBank() {
@@ -777,6 +881,7 @@ function renderStats() {
     ["Filtered", filteredJobs.length],
     ["Selected", state.selectedJobIds.size],
     ["In progress", filteredJobs.filter((job) => ["queued", "running", "submitting"].includes(getApplyStatus(job, latestRuns))).length],
+    ["Captcha blocked", filteredJobs.filter((job) => getApplyStatus(job, latestRuns) === "captcha_required").length],
     ["Needs review", filteredJobs.filter((job) => getApplyStatus(job, latestRuns) === "review").length],
     ["Done", filteredJobs.filter((job) => ["completed", "approved"].includes(getApplyStatus(job, latestRuns))).length],
     ["Failed", filteredJobs.filter((job) => ["failed", "rejected"].includes(getApplyStatus(job, latestRuns))).length],
@@ -814,8 +919,12 @@ function renderRuns() {
       const actionButtons = [
         `<button class="button button-secondary small-button" type="button" data-log-run="${escapeHtml(run.id)}">Open log</button>`,
       ];
-      if (normalizeStatus(run.status) === "review") {
-        actionButtons.push(`<button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(run.id)}">Open review</button>`);
+      if (["review", "captcha_required"].includes(normalizeStatus(run.status))) {
+        actionButtons.push(
+          `<button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(run.id)}">${
+            normalizeStatus(run.status) === "captcha_required" ? "Solve CAPTCHA" : "Open review"
+          }</button>`,
+        );
       }
       return `
         <div class="run-card">
@@ -931,8 +1040,10 @@ function renderJobs() {
                   : ""
               }
               ${
-                latestRun && applyStatus === "review"
-                  ? `<button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(latestRun.id)}">Review</button>`
+                latestRun && ["review", "captcha_required"].includes(applyStatus)
+                  ? `<button class="button button-secondary small-button" type="button" data-review-run="${escapeHtml(latestRun.id)}">${
+                      applyStatus === "captcha_required" ? "Solve" : "Review"
+                    }</button>`
                   : ""
               }
               <a class="link" href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">Open job</a>
@@ -978,7 +1089,7 @@ function renderJobs() {
 
 function renderLogDesk() {
   const logRuns = getLogRuns();
-  const activeCount = logRuns.filter((run) => ["queued", "running", "submitting"].includes(normalizeStatus(run.status))).length;
+  const activeCount = logRuns.filter((run) => ["queued", "running", "submitting", "captcha_required"].includes(normalizeStatus(run.status))).length;
   els.logSummary.textContent = logRuns.length
     ? `${logRuns.length} run${logRuns.length === 1 ? "" : "s"} available · ${activeCount} active.`
     : "No runs available.";
@@ -1096,12 +1207,14 @@ function renderLogDesk() {
 
 function renderReviewDesk() {
   const reviewRuns = getReviewRuns();
+  const reviewCount = reviewRuns.filter((run) => normalizeStatus(run.status) === "review").length;
+  const captchaCount = reviewRuns.filter((run) => normalizeStatus(run.status) === "captcha_required").length;
   els.reviewSummary.textContent = reviewRuns.length
-    ? `${reviewRuns.length} run${reviewRuns.length === 1 ? "" : "s"} awaiting review.`
-    : "No review runs pending.";
+    ? `${reviewRuns.length} manual run${reviewRuns.length === 1 ? "" : "s"} pending · ${reviewCount} review · ${captchaCount} captcha.`
+    : "No review or CAPTCHA runs pending.";
 
   if (!reviewRuns.length) {
-    els.reviewRunSelect.innerHTML = `<option value="">No review runs</option>`;
+    els.reviewRunSelect.innerHTML = `<option value="">No manual runs</option>`;
     els.reviewRunSelect.disabled = true;
     els.reviewEmptyState.hidden = false;
     els.reviewContent.hidden = true;
@@ -1111,6 +1224,8 @@ function renderReviewDesk() {
     els.reviewFields.innerHTML = "";
     els.reviewResumePreview.textContent = "";
     els.reviewScreenshot.removeAttribute("src");
+    els.openReviewLiveBrowserLink.hidden = true;
+    els.openReviewLiveBrowserLink.href = "#";
     return;
   }
 
@@ -1128,11 +1243,15 @@ function renderReviewDesk() {
   els.reviewContent.hidden = false;
 
   if (!selectedRun) {
+    els.openReviewLiveBrowserLink.hidden = true;
+    els.openReviewLiveBrowserLink.href = "#";
     return;
   }
 
   const job = getJobById(selectedRun.job_id);
   const pendingReview = selectedRun.pending_review || {};
+  const normalizedStatus = normalizeStatus(selectedRun.status);
+  const isCaptchaRun = normalizedStatus === "captcha_required";
   const tailoredResume = pendingReview.tailored_resume || selectedRun.artifacts?.tailored_resume || null;
   const fields = pendingReview.fields || selectedRun.extracted_fields || [];
   const notes = state.reviewNotesDrafts[selectedRun.id] ?? pendingReview.notes ?? "";
@@ -1145,18 +1264,22 @@ function renderReviewDesk() {
   const resumePreviewText = tailoredResume?.rendered_markdown || "";
   const resumeDecisionNote = getResumeDecisionNote(selectedRun);
   const submissionError = pendingReview.submission_error || selectedRun.error_message || "";
+  const manualBrowserUrl = pendingReview.manual_browser_url || "";
+  const manualBrowserNote = pendingReview.manual_browser_note || "";
 
   els.reviewNotesInput.value = notes;
+  els.approveReviewButton.textContent = isCaptchaRun ? "Resume after CAPTCHA" : "Approve & submit";
+  els.rejectReviewButton.textContent = isCaptchaRun ? "Stop run" : "Reject";
   els.reviewMeta.innerHTML = `
     <div class="review-meta-card">
       <div class="run-card-header">
         <h3>${escapeHtml(jobTitle)}</h3>
-        <span class="badge badge-review">review</span>
+        <span class="badge badge-${escapeHtml(normalizedStatus)}">${escapeHtml(selectedRun.status)}</span>
       </div>
       <p>${escapeHtml(jobCompany)}</p>
       <p>${escapeHtml(finalUrl || "Final review URL not available")}</p>
       <p>Updated ${escapeHtml(formatDate(selectedRun.updated_at, true))}</p>
-      <p>${escapeHtml(resumeDecisionNote || "Tailored resume generation status not recorded.")}</p>
+      <p>${escapeHtml(isCaptchaRun ? manualBrowserNote || "Solve the challenge in the live browser, then resume the run." : resumeDecisionNote || "Tailored resume generation status not recorded.")}</p>
       ${submissionError ? `<p class="job-meta review-warning">${escapeHtml(`Last submit attempt failed: ${submissionError}`)}</p>` : ""}
     </div>
   `;
@@ -1190,6 +1313,14 @@ function renderReviewDesk() {
   els.openReviewJobLink.hidden = !jobUrl;
   els.openReviewJobLink.href = jobUrl || "#";
   els.openReviewJobLink.setAttribute("aria-disabled", jobUrl ? "false" : "true");
+
+  if (manualBrowserUrl) {
+    els.openReviewLiveBrowserLink.hidden = false;
+    els.openReviewLiveBrowserLink.href = manualBrowserUrl;
+  } else {
+    els.openReviewLiveBrowserLink.hidden = true;
+    els.openReviewLiveBrowserLink.href = "#";
+  }
 
   if (resumeUrl) {
     els.reviewResumeEmpty.hidden = true;
@@ -1383,7 +1514,7 @@ function getSelectedLogRun() {
 
 function getReviewRuns() {
   return [...state.runs]
-    .filter((run) => normalizeStatus(run.status) === "review")
+    .filter((run) => ["review", "captcha_required"].includes(normalizeStatus(run.status)))
     .sort((left, right) => new Date(right.updated_at) - new Date(left.updated_at));
 }
 
@@ -1436,7 +1567,7 @@ function getApplyStatus(job, latestRuns) {
 
 function isRunnableJob(job, latestRuns = getLatestRunMap()) {
   const status = getApplyStatus(job, latestRuns);
-  return state.selectedProfileId && job.availability === "open" && !["queued", "running", "review", "submitting"].includes(status);
+  return state.selectedProfileId && job.availability === "open" && !["queued", "running", "review", "submitting", "captcha_required"].includes(status);
 }
 
 function getSourceLabel(job) {
@@ -1490,7 +1621,7 @@ function normalizePrompt(value) {
 
 function isSensitivePrompt(value) {
   const normalized = normalizePrompt(value);
-  return ["gender", "race", "ethnicity", "disability", "veteran", "pronoun", "sexual orientation", "date of birth", "dob", "age"].some(
+  return ["gender", "sex", "race", "ethnicity", "hispanic", "latino", "disability", "veteran", "pronoun", "sexual orientation", "date of birth", "dob", "age"].some(
     (token) => normalized.includes(token),
   );
 }
@@ -1559,6 +1690,40 @@ function renderSortIndicators() {
     if (button.dataset.sortKey === state.sort.key) {
       button.classList.add(state.sort.direction === "asc" ? "sort-asc" : "sort-desc");
     }
+  });
+}
+
+function formatDisclosureSummary(data = {}) {
+  const applicationPreferences = data?.application_preferences || {};
+  const eeo = data?.eeo || {};
+  const configured = [
+    applicationPreferences.current_employee ? `Current employee: ${applicationPreferences.current_employee}` : null,
+    eeo.gender ? `Gender: ${eeo.gender}` : null,
+    eeo.hispanic_latino ? `Hispanic / Latino: ${eeo.hispanic_latino}` : null,
+    eeo.ethnicity ? `Ethnicity: ${eeo.ethnicity}` : null,
+    eeo.veteran_status ? `Veteran: ${eeo.veteran_status}` : null,
+    eeo.disability_status ? `Disability: ${eeo.disability_status}` : null,
+  ].filter(Boolean);
+  if (!configured.length) {
+    return "No explicit company or EEO answers saved yet.";
+  }
+  return `Explicit settings · ${configured.join(" · ")}`;
+}
+
+function populateProfileSettingsForm(data = {}) {
+  const applicationPreferences = data?.application_preferences || {};
+  const eeo = data?.eeo || {};
+  setSelectValue(els.profileCurrentEmployeeInput, applicationPreferences.current_employee, PROFILE_SETTING_DEFAULTS.currentEmployee);
+  setSelectValue(els.profileGenderInput, eeo.gender, PROFILE_SETTING_DEFAULTS.gender);
+  setSelectValue(els.profileHispanicInput, eeo.hispanic_latino, PROFILE_SETTING_DEFAULTS.hispanicLatino);
+  setSelectValue(els.profileEthnicityInput, eeo.ethnicity, PROFILE_SETTING_DEFAULTS.ethnicity);
+  setSelectValue(els.profileVeteranInput, eeo.veteran_status, PROFILE_SETTING_DEFAULTS.veteranStatus);
+  setSelectValue(els.profileDisabilityInput, eeo.disability_status, PROFILE_SETTING_DEFAULTS.disabilityStatus);
+}
+
+function setProfileSettingsFormDisabled(disabled) {
+  els.profileSettingsForm.querySelectorAll("select, button").forEach((element) => {
+    element.disabled = disabled;
   });
 }
 
@@ -1637,6 +1802,89 @@ function getErrorMessage(error) {
     return error.message;
   }
   return "Request failed.";
+}
+
+function valueOrNull(value) {
+  const text = String(value ?? "").trim();
+  return text || null;
+}
+
+function deepClone(value) {
+  return JSON.parse(JSON.stringify(value || {}));
+}
+
+function setNestedString(target, path, value) {
+  let current = target;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const key = path[index];
+    if (!current[key] || typeof current[key] !== "object" || Array.isArray(current[key])) {
+      current[key] = {};
+    }
+    current = current[key];
+  }
+  const finalKey = path[path.length - 1];
+  if (value) {
+    current[finalKey] = value;
+    return;
+  }
+  delete current[finalKey];
+}
+
+function pruneEmptyData(value) {
+  if (Array.isArray(value)) {
+    const nextItems = value
+      .map((item) => pruneEmptyData(item))
+      .filter((item) => item !== undefined);
+    return nextItems.length ? nextItems : undefined;
+  }
+
+  if (value && typeof value === "object") {
+    const nextObject = {};
+    Object.entries(value).forEach(([key, entryValue]) => {
+      const prunedValue = pruneEmptyData(entryValue);
+      if (prunedValue !== undefined) {
+        nextObject[key] = prunedValue;
+      }
+    });
+    return Object.keys(nextObject).length ? nextObject : undefined;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  return value;
+}
+
+function setSelectValue(select, value, fallback = "") {
+  if (!select) {
+    return;
+  }
+  select.querySelectorAll('option[data-dynamic="true"]').forEach((option) => option.remove());
+  const desiredValue = value ?? fallback;
+  const optionValues = [...select.options].map((option) => option.value);
+  if (desiredValue && !optionValues.includes(desiredValue)) {
+    const dynamicOption = document.createElement("option");
+    dynamicOption.value = desiredValue;
+    dynamicOption.textContent = `Custom: ${desiredValue}`;
+    dynamicOption.dataset.dynamic = "true";
+    select.append(dynamicOption);
+  }
+  const availableValues = [...select.options].map((option) => option.value);
+  if (availableValues.includes(desiredValue)) {
+    select.value = desiredValue;
+    return;
+  }
+  if (availableValues.includes(fallback)) {
+    select.value = fallback;
+    return;
+  }
+  select.value = availableValues[0] || "";
 }
 
 async function fetchJson(url, options = {}) {

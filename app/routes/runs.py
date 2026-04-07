@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.agent.live_sessions import signal_live_run_cancel, signal_live_run_resume
 from app.agent.runner import execute_run, submit_approved_run
 from app.config import get_settings
 from app.db import get_session
@@ -16,7 +18,12 @@ from app.schemas import BulkRunCreate, BulkRunRead, RunApproval, RunCreate, RunR
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-ACTIVE_RUN_STATUSES = {"queued", "running", "review", "submitting"}
+ACTIVE_RUN_STATUSES = {"queued", "running", "review", "submitting", "captcha_required"}
+STALE_SUBMITTING_TIMEOUT = timedelta(minutes=10)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _resolve_storage_file(path_value: str | None) -> Path:
@@ -86,12 +93,42 @@ def _serialize_run(run: Run) -> RunRead:
     )
 
 
+def _recover_stale_submitting_runs(session: Session) -> None:
+    cutoff = utc_now() - STALE_SUBMITTING_TIMEOUT
+    stale_runs = (
+        session.query(Run)
+        .filter(Run.status == "submitting", Run.updated_at < cutoff)
+        .all()
+    )
+    if not stale_runs:
+        return
+
+    for run in stale_runs:
+        job = session.get(Job, run.job_id)
+        message = (
+            f"Automatic submit stalled for more than {int(STALE_SUBMITTING_TIMEOUT.total_seconds() // 60)} minutes and was returned to review."
+        )
+        run.status = "review"
+        run.error_message = message
+        run.pending_review = {
+            **(run.pending_review or {}),
+            "approved": True,
+            "submission_error": message,
+        }
+        if job is not None:
+            job.status = "review"
+        logger.warning("Recovered stale submitting run %s back to review.", run.id)
+
+    session.commit()
+
+
 @router.get("", response_model=list[RunRead])
 def list_runs(
     profile_id: str | None = None,
     job_id: str | None = None,
     session: Session = Depends(get_session),
 ) -> list[RunRead]:
+    _recover_stale_submitting_runs(session)
     query = session.query(Run)
     if profile_id is not None:
         query = query.filter(Run.profile_id == profile_id)
@@ -103,6 +140,7 @@ def list_runs(
 
 @router.get("/{run_id}", response_model=RunRead)
 def get_run(run_id: str, session: Session = Depends(get_session)) -> RunRead:
+    _recover_stale_submitting_runs(session)
     run = session.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
@@ -284,6 +322,36 @@ def approve_run(
     return _serialize_run(run)
 
 
+@router.post("/{run_id}/captcha/resume", response_model=RunRead)
+async def resume_captcha_run(
+    run_id: str,
+    payload: RunApproval,
+    session: Session = Depends(get_session),
+) -> RunRead:
+    run = session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    if run.status != "captcha_required":
+        raise HTTPException(status_code=409, detail="Only runs waiting on CAPTCHA can be resumed.")
+
+    if payload.notes is not None:
+        run.pending_review = {
+            **(run.pending_review or {}),
+            "notes": payload.notes,
+        }
+        session.commit()
+        session.refresh(run)
+
+    if not signal_live_run_resume(run.id):
+        raise HTTPException(
+            status_code=409,
+            detail="No live CAPTCHA session is available for this run. Requeue the run after enabling browser desktop access.",
+        )
+
+    logger.info("Resume signal sent for CAPTCHA-blocked run %s.", run.id)
+    return _serialize_run(run)
+
+
 @router.post("/{run_id}/reject", response_model=RunRead)
 def reject_run(
     run_id: str,
@@ -293,8 +361,8 @@ def reject_run(
     run = session.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found.")
-    if run.status != "review":
-        raise HTTPException(status_code=409, detail="Only runs in review status can be rejected.")
+    if run.status not in {"review", "captcha_required"}:
+        raise HTTPException(status_code=409, detail="Only runs in review or captcha_required status can be rejected.")
 
     job = session.get(Job, run.job_id)
     logger.info("Rejecting review run %s for job %s.", run.id, run.job_id)
@@ -308,4 +376,5 @@ def reject_run(
         job.status = run.status
     session.commit()
     session.refresh(run)
+    signal_live_run_cancel(run.id)
     return _serialize_run(run)

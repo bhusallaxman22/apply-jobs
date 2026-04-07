@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from copy import deepcopy
@@ -11,6 +12,11 @@ from playwright.async_api import async_playwright
 from app.agent.actions import click_target, select_target, type_target
 from app.agent.classifiers import detect_platform
 from app.agent.extractor import extract_page_state
+from app.agent.live_sessions import (
+    clear_live_run,
+    register_live_run,
+    reset_live_run_resume,
+)
 from app.agent.planner import decide_next_action
 from app.agent.safety import SUBMIT_KEYWORDS, normalize_text, should_stop_for_review
 from app.config import get_settings
@@ -23,7 +29,9 @@ from app.site_adapters import get_adapter
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_INTERVAL_SECONDS = 10.0
+SUBMIT_RUN_TIMEOUT_SECONDS = 300.0
 MAX_PROGRESS_SCREENSHOTS = 120
+CAPTCHA_WAIT_POLL_SECONDS = 5.0
 SUBMISSION_SUCCESS_TEXT = (
     "thank you for applying",
     "application submitted",
@@ -31,6 +39,31 @@ SUBMISSION_SUCCESS_TEXT = (
     "we received your application",
     "we've received your application",
     "successfully submitted",
+)
+CAPTCHA_TEXT_HINTS = (
+    "captcha",
+    "verify you are human",
+    "verification required",
+    "security check",
+    "not a robot",
+    "recaptcha",
+    "hcaptcha",
+    "turnstile",
+    "press and hold",
+    "unusual traffic",
+)
+CAPTCHA_SELECTOR_CANDIDATES = (
+    'iframe[src*="recaptcha"]',
+    'iframe[src*="hcaptcha"]',
+    'iframe[src*="turnstile"]',
+    'iframe[src*="challenges.cloudflare.com"]',
+    ".g-recaptcha",
+    ".h-captcha",
+    ".cf-turnstile",
+    '[name="g-recaptcha-response"]',
+    '[name="h-captcha-response"]',
+    '[name="cf-turnstile-response"]',
+    '[data-sitekey]',
 )
 
 
@@ -221,6 +254,336 @@ async def _save_browser_state(context, run_id: str) -> str:
     return str(state_path)
 
 
+async def _finalize_captcha_pause(
+    *,
+    context,
+    trace_path: Path,
+    trace_key: str,
+    run_id: str,
+    decisions: list[dict],
+    artifacts: dict,
+    extracted_fields: list[dict],
+    result: dict,
+) -> None:
+    await context.tracing.stop(path=str(trace_path))
+    artifacts[trace_key] = str(trace_path)
+    await _persist_run_progress(
+        run_id=run_id,
+        status="captcha_required",
+        decisions=decisions,
+        artifacts=artifacts,
+        extracted_fields=extracted_fields,
+        result=result,
+    )
+
+
+def _manual_browser_url() -> str | None:
+    settings = get_settings()
+    if not settings.browser_desktop_enabled:
+        return None
+    if settings.browser_desktop_public_url:
+        return settings.browser_desktop_public_url
+    return None
+
+
+def _manual_browser_note() -> str:
+    settings = get_settings()
+    if not settings.browser_desktop_enabled:
+        return "Live browser access is disabled. Enable BROWSER_DESKTOP_ENABLED and set BROWSER_DESKTOP_PUBLIC_URL to solve CAPTCHA in-session."
+    if settings.browser_desktop_public_url:
+        return "Open the live browser, solve the challenge, then press Resume after CAPTCHA."
+    return (
+        "Live browser access is enabled but no public URL is configured. "
+        "Set BROWSER_DESKTOP_PUBLIC_URL so the dashboard can open the noVNC session directly."
+    )
+
+
+async def _detect_captcha(page, page_state=None) -> dict | None:
+    page_state = page_state or await extract_page_state(page)
+    visible_text = normalize_text(page_state.visible_text)
+    title = normalize_text(page_state.title)
+    url = normalize_text(page_state.url)
+    matched_signals: list[str] = []
+
+    for token in CAPTCHA_TEXT_HINTS:
+        if token in visible_text or token in title or token in url:
+            matched_signals.append(token)
+
+    matched_selectors: list[str] = []
+    for selector in CAPTCHA_SELECTOR_CANDIDATES:
+        try:
+            if await page.locator(selector).count():
+                matched_selectors.append(selector)
+        except Exception:
+            continue
+
+    if not matched_signals and not matched_selectors:
+        return None
+
+    reason_parts: list[str] = []
+    if matched_signals:
+        reason_parts.append(f"text markers: {', '.join(sorted(set(matched_signals)))}")
+    if matched_selectors:
+        reason_parts.append(f"DOM markers: {', '.join(matched_selectors)}")
+
+    return {
+        "reason": "CAPTCHA challenge detected via " + "; ".join(reason_parts),
+        "signals": sorted(set(matched_signals)),
+        "selectors": matched_selectors,
+        "page_state": page_state,
+    }
+
+
+def _browser_headless(settings) -> bool:
+    return settings.headless and not settings.browser_desktop_enabled
+
+
+async def _store_captcha_required_state(
+    *,
+    run_id: str,
+    status_after_resume: str,
+    page,
+    context,
+    decisions: list[dict],
+    artifacts: dict,
+    extracted_fields: list[dict],
+    result: dict,
+    captcha_data: dict,
+    note: str,
+) -> dict:
+    page_state = captcha_data["page_state"]
+    snapshot = await _save_snapshot(page, run_id, prefix="latest", suffix="captcha")
+    artifacts.update(snapshot)
+    artifacts["captcha_screenshot"] = snapshot["latest_screenshot"]
+    artifacts["captcha_html"] = snapshot["latest_html"]
+    try:
+        browser_state_path = await _save_browser_state(context, run_id)
+        artifacts["browser_state"] = browser_state_path
+    except Exception as exc:
+        logger.warning("Run %s could not save browser state during CAPTCHA pause: %s", run_id, exc)
+
+    _append_decision(
+        decisions,
+        {
+            "action": "pause",
+            "target": page_state.url,
+            "source": "captcha",
+            "note": note,
+        },
+    )
+    result.update(
+        {
+            "status": "captcha_required",
+            "current_url": page_state.url,
+            "page_title": page_state.title,
+            "captcha_required_at": utc_now().isoformat(),
+        }
+    )
+    manual_browser_url = _manual_browser_url()
+    manual_note = _manual_browser_note()
+
+    with session_scope() as session:
+        run = session.get(Run, run_id)
+        if run is None:
+            return {
+                "manual_browser_url": manual_browser_url,
+                "manual_note": manual_note,
+                "page_state": page_state,
+            }
+        job = session.get(Job, run.job_id)
+        run.status = "captcha_required"
+        run.decisions = deepcopy(decisions)
+        run.artifacts = deepcopy(artifacts)
+        run.extracted_fields = deepcopy(extracted_fields)
+        run.result = deepcopy(result)
+        run.error_message = None
+        run.pending_review = {
+            **(run.pending_review or {}),
+            "captcha_detected": True,
+            "captcha_reason": captcha_data["reason"],
+            "captcha_signals": captcha_data["signals"],
+            "captcha_selectors": captcha_data["selectors"],
+            "final_url": page_state.url,
+            "fields": deepcopy(extracted_fields),
+            "browser_state": artifacts.get("browser_state"),
+            "manual_browser_url": manual_browser_url,
+            "manual_browser_note": manual_note,
+            "resume_status": status_after_resume,
+        }
+        if job is not None:
+            job.status = run.status
+
+    return {
+        "manual_browser_url": manual_browser_url,
+        "manual_note": manual_note,
+        "page_state": page_state,
+    }
+
+
+async def _wait_for_manual_captcha_resolution(
+    *,
+    run_id: str,
+    status_after_resume: str,
+    page,
+    context,
+    decisions: list[dict],
+    artifacts: dict,
+    extracted_fields: list[dict],
+    result: dict,
+    checkpoint_state: dict,
+    captcha_data: dict,
+) -> bool:
+    settings = get_settings()
+    note = captcha_data["reason"]
+    captcha_state = await _store_captcha_required_state(
+        run_id=run_id,
+        status_after_resume=status_after_resume,
+        page=page,
+        context=context,
+        decisions=decisions,
+        artifacts=artifacts,
+        extracted_fields=extracted_fields,
+        result=result,
+        captcha_data=captcha_data,
+        note=note,
+    )
+    async def captcha_progress_hook(reason: str, *, force: bool = False) -> dict | None:
+        return await _checkpoint_progress(
+            run_id=run_id,
+            page=page,
+            status="captcha_required",
+            decisions=decisions,
+            artifacts=artifacts,
+            extracted_fields=extracted_fields,
+            result=result,
+            checkpoint_state=checkpoint_state,
+            reason=reason,
+            force=force,
+        )
+
+    await captcha_progress_hook("CAPTCHA detected and run paused for manual solve.", force=True)
+
+    if not settings.browser_desktop_enabled:
+        logger.warning("Run %s entered captcha_required, but live browser access is disabled.", run_id)
+        return False
+
+    live_run = register_live_run(run_id, status_after_resume)
+    logger.warning("Run %s paused for manual CAPTCHA solve.", run_id)
+
+    deadline = time.monotonic() + max(settings.captcha_wait_timeout_seconds, 1)
+    try:
+        while True:
+            if live_run.cancel_event.is_set():
+                logger.info("Run %s manual CAPTCHA flow canceled.", run_id)
+                return False
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timeout_note = (
+                    f"Manual CAPTCHA solve timed out after {int(settings.captcha_wait_timeout_seconds)} seconds. "
+                    "Reopen the run and retry when ready."
+                )
+                captcha_data = await _detect_captcha(page) or captcha_data
+                await _store_captcha_required_state(
+                    run_id=run_id,
+                    status_after_resume=status_after_resume,
+                    page=page,
+                    context=context,
+                    decisions=decisions,
+                    artifacts=artifacts,
+                    extracted_fields=extracted_fields,
+                    result=result,
+                    captcha_data=captcha_data,
+                    note=timeout_note,
+                )
+                logger.warning("Run %s timed out while waiting for manual CAPTCHA solve.", run_id)
+                return False
+
+            try:
+                await asyncio.wait_for(
+                    live_run.resume_event.wait(),
+                    timeout=min(CAPTCHA_WAIT_POLL_SECONDS, remaining),
+                )
+            except TimeoutError:
+                await captcha_progress_hook("Waiting for manual CAPTCHA solve in the live browser.")
+                continue
+
+            reset_live_run_resume(run_id)
+            await _wait_for_page_settle(page)
+            current_captcha = await _detect_captcha(page)
+            if current_captcha is not None:
+                retry_note = (
+                    current_captcha["reason"]
+                    + ". Resume was requested, but the challenge still appears to be present."
+                )
+                await _store_captcha_required_state(
+                    run_id=run_id,
+                    status_after_resume=status_after_resume,
+                    page=page,
+                    context=context,
+                    decisions=decisions,
+                    artifacts=artifacts,
+                    extracted_fields=extracted_fields,
+                    result=result,
+                    captcha_data=current_captcha,
+                    note=retry_note,
+                )
+                await captcha_progress_hook("CAPTCHA still detected after manual resume request.", force=True)
+                continue
+
+            _append_decision(
+                decisions,
+                {
+                    "action": "resume",
+                    "target": captcha_state["page_state"].url,
+                    "source": "captcha",
+                    "note": "Manual CAPTCHA solve cleared. Resuming automation.",
+                },
+            )
+            result.update(
+                {
+                    "status": status_after_resume,
+                    "current_url": page.url,
+                    "page_title": await page.title(),
+                }
+            )
+            with session_scope() as session:
+                run = session.get(Run, run_id)
+                job = session.get(Job, run.job_id) if run else None
+                if run is not None:
+                    run.status = status_after_resume
+                    run.decisions = deepcopy(decisions)
+                    run.artifacts = deepcopy(artifacts)
+                    run.extracted_fields = deepcopy(extracted_fields)
+                    run.result = deepcopy(result)
+                    run.error_message = None
+                    run.pending_review = {
+                        **(run.pending_review or {}),
+                        "captcha_detected": False,
+                        "captcha_reason": None,
+                        "manual_browser_url": _manual_browser_url(),
+                        "manual_browser_note": _manual_browser_note(),
+                    }
+                if job is not None:
+                    job.status = status_after_resume
+            await _checkpoint_progress(
+                run_id=run_id,
+                page=page,
+                status=status_after_resume,
+                decisions=decisions,
+                artifacts=artifacts,
+                extracted_fields=extracted_fields,
+                result=result,
+                checkpoint_state=checkpoint_state,
+                reason="Manual CAPTCHA solve acknowledged. Resuming automation.",
+                force=True,
+            )
+            logger.info("Run %s resumed after manual CAPTCHA solve.", run_id)
+            return True
+    finally:
+        clear_live_run(run_id)
+
+
 def _candidate_submit_targets(page_state) -> list[str]:
     targets: list[str] = []
     seen: set[str] = set()
@@ -391,100 +754,239 @@ async def submit_approved_run(run_id: str) -> None:
         )
 
     try:
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=settings.headless,
-                slow_mo=settings.slow_mo_ms,
-            )
-            context_kwargs = {}
-            if browser_state_path and Path(browser_state_path).is_file():
-                context_kwargs["storage_state"] = browser_state_path
-                logger.info("Run %s restored browser state from %s.", run_id, browser_state_path)
-            context = await browser.new_context(**context_kwargs)
-            context.set_default_timeout(settings.navigation_timeout_ms)
-            await context.tracing.start(screenshots=True, snapshots=True, sources=True)
-            page = await context.new_page()
-            await page.goto(review_url, wait_until="domcontentloaded")
-            await progress_hook("Opened approved run at the saved review URL.", force=True)
+        async with asyncio.timeout(SUBMIT_RUN_TIMEOUT_SECONDS):
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(
+                    headless=_browser_headless(settings),
+                    slow_mo=settings.slow_mo_ms,
+                )
+                context_kwargs = {}
+                if browser_state_path and Path(browser_state_path).is_file():
+                    context_kwargs["storage_state"] = browser_state_path
+                    logger.info("Run %s restored browser state from %s.", run_id, browser_state_path)
+                context = await browser.new_context(**context_kwargs)
+                context.set_default_timeout(settings.navigation_timeout_ms)
+                await context.tracing.start(screenshots=True, snapshots=True, sources=True)
+                page = await context.new_page()
+                await page.goto(review_url, wait_until="domcontentloaded")
+                await progress_hook("Opened approved run at the saved review URL.", force=True)
+                captcha_data = await _detect_captcha(page)
+                if captcha_data is not None:
+                    should_resume = await _wait_for_manual_captcha_resolution(
+                        run_id=run_id,
+                        status_after_resume="submitting",
+                        page=page,
+                        context=context,
+                        decisions=decisions,
+                        artifacts=artifacts,
+                        extracted_fields=extracted_fields,
+                        result=result,
+                        checkpoint_state=checkpoint_state,
+                        captcha_data=captcha_data,
+                    )
+                    if not should_resume:
+                        await _finalize_captcha_pause(
+                            context=context,
+                            trace_path=trace_path,
+                            trace_key="submission_trace",
+                            run_id=run_id,
+                            decisions=decisions,
+                            artifacts=artifacts,
+                            extracted_fields=extracted_fields,
+                            result=result,
+                        )
+                        await browser.close()
+                        return
 
-            adapter = get_adapter(platform)
-            initial_state = await extract_page_state(page)
-            if not should_stop_for_review(initial_state):
-                started = await adapter.start_application(page)
-                _append_decision(
+                adapter = get_adapter(platform)
+                initial_state = await extract_page_state(page)
+                if not should_stop_for_review(initial_state):
+                    started = await adapter.start_application(page)
+                    _append_decision(
+                        decisions,
+                        {
+                            "action": "click" if started else "fallback",
+                            "target": "apply",
+                            "source": adapter.name,
+                            "note": "Approved-submit flow attempted to reopen the application form.",
+                        }
+                    )
+                    if started:
+                        logger.info("Run %s reopened application flow with adapter %s.", run_id, adapter.name)
+                        await _wait_for_page_settle(page)
+                        captcha_data = await _detect_captcha(page)
+                        if captcha_data is not None:
+                            should_resume = await _wait_for_manual_captcha_resolution(
+                                run_id=run_id,
+                                status_after_resume="submitting",
+                                page=page,
+                                context=context,
+                                decisions=decisions,
+                                artifacts=artifacts,
+                                extracted_fields=extracted_fields,
+                                result=result,
+                                checkpoint_state=checkpoint_state,
+                                captcha_data=captcha_data,
+                            )
+                            if not should_resume:
+                                await _finalize_captcha_pause(
+                                    context=context,
+                                    trace_path=trace_path,
+                                    trace_key="submission_trace",
+                                    run_id=run_id,
+                                    decisions=decisions,
+                                    artifacts=artifacts,
+                                    extracted_fields=extracted_fields,
+                                    result=result,
+                                )
+                                await browser.close()
+                                return
+                    await progress_hook("Tried to reopen the application form after approval.", force=True)
+
+                extracted_fields = await _progress_application_until_submit(
+                    page,
+                    adapter,
+                    profile_data,
+                    answer_entries,
                     decisions,
+                    progress_hook=progress_hook,
+                )
+
+                captcha_data = await _detect_captcha(page)
+                if captcha_data is not None:
+                    should_resume = await _wait_for_manual_captcha_resolution(
+                        run_id=run_id,
+                        status_after_resume="submitting",
+                        page=page,
+                        context=context,
+                        decisions=decisions,
+                        artifacts=artifacts,
+                        extracted_fields=extracted_fields,
+                        result=result,
+                        checkpoint_state=checkpoint_state,
+                        captcha_data=captcha_data,
+                    )
+                    if not should_resume:
+                        await _finalize_captcha_pause(
+                            context=context,
+                            trace_path=trace_path,
+                            trace_key="submission_trace",
+                            run_id=run_id,
+                            decisions=decisions,
+                            artifacts=artifacts,
+                            extracted_fields=extracted_fields,
+                            result=result,
+                        )
+                        await browser.close()
+                        return
+
+                review_state = await extract_page_state(page)
+                if not should_stop_for_review(review_state):
+                    raise RuntimeError("Approved submit could not reach a final submit step.")
+
+                await _click_submit(page, decisions)
+                await _wait_for_page_settle(page)
+                final_state = await extract_page_state(page)
+                captcha_data = await _detect_captcha(page, final_state)
+                if captcha_data is not None:
+                    should_resume = await _wait_for_manual_captcha_resolution(
+                        run_id=run_id,
+                        status_after_resume="submitting",
+                        page=page,
+                        context=context,
+                        decisions=decisions,
+                        artifacts=artifacts,
+                        extracted_fields=extracted_fields,
+                        result=result,
+                        checkpoint_state=checkpoint_state,
+                        captcha_data=captcha_data,
+                    )
+                    if not should_resume:
+                        await _finalize_captcha_pause(
+                            context=context,
+                            trace_path=trace_path,
+                            trace_key="submission_trace",
+                            run_id=run_id,
+                            decisions=decisions,
+                            artifacts=artifacts,
+                            extracted_fields=extracted_fields,
+                            result=result,
+                        )
+                        await browser.close()
+                        return
+                    final_state = await extract_page_state(page)
+                await progress_hook("Clicked final submit control after approval.", force=True)
+
+                submitted_artifacts = await _save_snapshot(page, run_id, prefix="submitted", suffix="submitted-page")
+                artifacts.update(submitted_artifacts)
+                artifacts["latest_screenshot"] = submitted_artifacts["submitted_screenshot"]
+                artifacts["latest_html"] = submitted_artifacts["submitted_html"]
+                await context.tracing.stop(path=str(trace_path))
+                artifacts["submission_trace"] = str(trace_path)
+
+                if not _submission_looks_complete(review_state, final_state):
+                    raise RuntimeError("Submit was clicked, but the page did not show a clear submission confirmation.")
+
+                result.update(
                     {
-                        "action": "click" if started else "fallback",
-                        "target": "apply",
-                        "source": adapter.name,
-                        "note": "Approved-submit flow attempted to reopen the application form.",
+                        "status": "completed",
+                        "final_url": final_state.url,
+                        "page_title": final_state.title,
+                        "submitted": True,
+                        "submitted_at": utc_now().isoformat(),
                     }
                 )
-                if started:
-                    logger.info("Run %s reopened application flow with adapter %s.", run_id, adapter.name)
-                    await _wait_for_page_settle(page)
-                await progress_hook("Tried to reopen the application form after approval.", force=True)
 
-            extracted_fields = await _progress_application_until_submit(
-                page,
-                adapter,
-                profile_data,
-                answer_entries,
-                decisions,
-                progress_hook=progress_hook,
-            )
+                with session_scope() as session:
+                    run = session.get(Run, run_id)
+                    job = session.get(Job, run.job_id)
+                    run.status = "completed"
+                    run.decisions = decisions
+                    run.artifacts = artifacts
+                    run.extracted_fields = extracted_fields
+                    run.result = result
+                    run.error_message = None
+                    run.pending_review = {
+                        **(run.pending_review or {}),
+                        "approved": True,
+                        "submission_error": None,
+                        "submitted": True,
+                        "final_url": final_state.url,
+                        "fields": extracted_fields,
+                    }
+                    run.finished_at = utc_now()
+                    job.status = run.status
+                    logger.info("Run %s auto-submitted successfully.", run_id)
 
-            review_state = await extract_page_state(page)
-            if not should_stop_for_review(review_state):
-                raise RuntimeError("Approved submit could not reach a final submit step.")
-
-            await _click_submit(page, decisions)
-            await _wait_for_page_settle(page)
-            final_state = await extract_page_state(page)
-            await progress_hook("Clicked final submit control after approval.", force=True)
-
-            submitted_artifacts = await _save_snapshot(page, run_id, prefix="submitted", suffix="submitted-page")
-            artifacts.update(submitted_artifacts)
-            artifacts["latest_screenshot"] = submitted_artifacts["submitted_screenshot"]
-            artifacts["latest_html"] = submitted_artifacts["submitted_html"]
-            await context.tracing.stop(path=str(trace_path))
-            artifacts["submission_trace"] = str(trace_path)
-
-            if not _submission_looks_complete(review_state, final_state):
-                raise RuntimeError("Submit was clicked, but the page did not show a clear submission confirmation.")
-
-            result.update(
-                {
-                    "status": "completed",
-                    "final_url": final_state.url,
-                    "page_title": final_state.title,
-                    "submitted": True,
-                    "submitted_at": utc_now().isoformat(),
-                }
-            )
-
-            with session_scope() as session:
-                run = session.get(Run, run_id)
-                job = session.get(Job, run.job_id)
-                run.status = "completed"
+                await browser.close()
+    except TimeoutError as exc:
+        exc = RuntimeError(f"Approved submit timed out after {int(SUBMIT_RUN_TIMEOUT_SECONDS)} seconds.")
+        result.update({"status": "review_required", "submitted": False})
+        with session_scope() as session:
+            run = session.get(Run, run_id)
+            job = session.get(Job, run.job_id) if run else None
+            if run:
+                run.status = "review"
                 run.decisions = decisions
                 run.artifacts = artifacts
                 run.extracted_fields = extracted_fields
-                run.result = result
-                run.error_message = None
+                run.result = {
+                    **result,
+                    "status": "review_required",
+                    "submitted": False,
+                }
+                run.error_message = str(exc)
                 run.pending_review = {
                     **(run.pending_review or {}),
                     "approved": True,
-                    "submission_error": None,
-                    "submitted": True,
-                    "final_url": final_state.url,
-                    "fields": extracted_fields,
+                    "submission_error": str(exc),
+                    "fields": extracted_fields or (run.pending_review or {}).get("fields", []),
                 }
                 run.finished_at = utc_now()
-                job.status = run.status
-                logger.info("Run %s auto-submitted successfully.", run_id)
-
-            await browser.close()
+            if job:
+                job.status = "review"
+        logger.exception("Approved-submit flow timed out for run %s: %s", run_id, exc)
+        raise exc
     except Exception as exc:
         result.update({"status": "review_required", "submitted": False})
         with session_scope() as session:
@@ -556,7 +1058,7 @@ async def execute_run(run_id: str) -> None:
     try:
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(
-                headless=settings.headless,
+                headless=_browser_headless(settings),
                 slow_mo=settings.slow_mo_ms,
             )
             context = await browser.new_context()
@@ -663,9 +1165,63 @@ async def execute_run(run_id: str) -> None:
                 started,
             )
             await progress_hook("Attempted to click the apply entrypoint.", force=True)
+            captcha_data = await _detect_captcha(page)
+            if captcha_data is not None:
+                should_resume = await _wait_for_manual_captcha_resolution(
+                    run_id=run_id,
+                    status_after_resume="running",
+                    page=page,
+                    context=context,
+                    decisions=decisions,
+                    artifacts=artifacts,
+                    extracted_fields=extracted_fields,
+                    result=result,
+                    checkpoint_state=checkpoint_state,
+                    captcha_data=captcha_data,
+                )
+                if not should_resume:
+                    await _finalize_captcha_pause(
+                        context=context,
+                        trace_path=trace_path,
+                        trace_key="trace",
+                        run_id=run_id,
+                        decisions=decisions,
+                        artifacts=artifacts,
+                        extracted_fields=extracted_fields,
+                        result=result,
+                    )
+                    await browser.close()
+                    return
 
             if not started:
                 await _planner_navigate(page, decisions, progress_hook=progress_hook)
+                captcha_data = await _detect_captcha(page)
+                if captcha_data is not None:
+                    should_resume = await _wait_for_manual_captcha_resolution(
+                        run_id=run_id,
+                        status_after_resume="running",
+                        page=page,
+                        context=context,
+                        decisions=decisions,
+                        artifacts=artifacts,
+                        extracted_fields=extracted_fields,
+                        result=result,
+                        checkpoint_state=checkpoint_state,
+                        captcha_data=captcha_data,
+                    )
+                    if not should_resume:
+                        await _finalize_captcha_pause(
+                            context=context,
+                            trace_path=trace_path,
+                            trace_key="trace",
+                            run_id=run_id,
+                            decisions=decisions,
+                            artifacts=artifacts,
+                            extracted_fields=extracted_fields,
+                            result=result,
+                        )
+                        await browser.close()
+                        return
 
             fields, filled, skipped = await adapter.autofill_fields(page, profile_data_for_run, answer_entries)
             _extend_decisions(decisions, filled)
@@ -679,6 +1235,33 @@ async def execute_run(run_id: str) -> None:
                 len(skipped),
             )
             await progress_hook(f"Autofill completed with {len(fields)} extracted fields.", force=True)
+            captcha_data = await _detect_captcha(page)
+            if captcha_data is not None:
+                should_resume = await _wait_for_manual_captcha_resolution(
+                    run_id=run_id,
+                    status_after_resume="running",
+                    page=page,
+                    context=context,
+                    decisions=decisions,
+                    artifacts=artifacts,
+                    extracted_fields=extracted_fields,
+                    result=result,
+                    checkpoint_state=checkpoint_state,
+                    captcha_data=captcha_data,
+                )
+                if not should_resume:
+                    await _finalize_captcha_pause(
+                        context=context,
+                        trace_path=trace_path,
+                        trace_key="trace",
+                        run_id=run_id,
+                        decisions=decisions,
+                        artifacts=artifacts,
+                        extracted_fields=extracted_fields,
+                        result=result,
+                    )
+                    await browser.close()
+                    return
 
             final_page_state = await extract_page_state(page)
             review_required = settings.require_human_approval or should_stop_for_review(final_page_state)

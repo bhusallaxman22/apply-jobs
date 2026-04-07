@@ -798,6 +798,11 @@ body {
   background: var(--warning-bg);
 }
 
+.badge-captcha_required {
+  color: var(--warning);
+  background: var(--warning-bg);
+}
+
 .badge-review,
 .badge-approved,
 .badge-completed {

@@ -32,6 +32,21 @@ FIELD_MAP = {
     "start date": "defaults.start_date",
     "resume": "documents.resume_pdf",
     "resume/cv": "documents.resume_pdf",
+    "current employee": "application_preferences.current_employee",
+    "currently employed by this company": "application_preferences.current_employee",
+    "already employed by this company": "application_preferences.current_employee",
+    "already employed to this company": "application_preferences.current_employee",
+    "gender": "eeo.gender",
+    "sex": "eeo.gender",
+    "hispanic ethnicity": "eeo.hispanic_latino",
+    "hispanic or latino": "eeo.hispanic_latino",
+    "hispanic latino": "eeo.hispanic_latino",
+    "ethnicity": "eeo.ethnicity",
+    "race": "eeo.ethnicity",
+    "race ethnicity": "eeo.ethnicity",
+    "veteran status": "eeo.veteran_status",
+    "disability status": "eeo.disability_status",
+    "disability": "eeo.disability_status",
 }
 
 
@@ -74,6 +89,25 @@ def _derive_country(profile_data: dict[str, Any]) -> str | None:
     return parts[-1]
 
 
+def _rule_based_profile_path(normalized: str) -> str | None:
+    if (
+        any(token in normalized for token in {"current employee", "currently employed", "already employed"})
+        and any(token in normalized for token in {"company", "employer", "organization", "here"})
+    ):
+        return "application_preferences.current_employee"
+    if "gender" in normalized or normalized == "sex":
+        return "eeo.gender"
+    if "hispanic" in normalized or "latino" in normalized:
+        return "eeo.hispanic_latino"
+    if "veteran" in normalized:
+        return "eeo.veteran_status"
+    if "disability" in normalized or "disabled" in normalized:
+        return "eeo.disability_status"
+    if "ethnicity" in normalized or "race" in normalized:
+        return "eeo.ethnicity"
+    return None
+
+
 def lookup_profile_value(label: str, profile_data: dict[str, Any], min_score: int = 88) -> tuple[str | None, Any]:
     normalized = normalize_label(label)
     if normalized in FIELD_MAP:
@@ -81,6 +115,12 @@ def lookup_profile_value(label: str, profile_data: dict[str, Any], min_score: in
         value = _get_nested(profile_data, path)
         if value is not None:
             return path, value
+
+    rule_based_path = _rule_based_profile_path(normalized)
+    if rule_based_path:
+        value = _get_nested(profile_data, rule_based_path)
+        if value is not None:
+            return rule_based_path, value
 
     if normalized == "country":
         derived_country = _derive_country(profile_data)
