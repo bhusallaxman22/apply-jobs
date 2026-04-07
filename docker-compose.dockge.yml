@@ -1,0 +1,63 @@
+services:
+  job-agent-api:
+    image: ghcr.io/bhusallaxman22/apply-jobs:${JOB_AGENT_TAG:-latest}
+    pull_policy: always
+    container_name: job-agent-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${JOB_AGENT_PORT:-8095}:8095"
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      HOST: 0.0.0.0
+      PORT: 8095
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD:-jobagent}@postgres:5432/${POSTGRES_DB:-jobagent}
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?set-your-ollama-base-url}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:8b}
+      STORAGE_ROOT: /data
+      HEADLESS: ${HEADLESS:-true}
+      REQUIRE_HUMAN_APPROVAL: ${REQUIRE_HUMAN_APPROVAL:-true}
+      NAVIGATION_TIMEOUT_MS: ${NAVIGATION_TIMEOUT_MS:-45000}
+      MAX_AGENT_STEPS: ${MAX_AGENT_STEPS:-15}
+    volumes:
+      - ${JOB_AGENT_DATA_DIR:-/mnt/mainpool/apps/job-agent/data}:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8095/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  postgres:
+    image: postgres:16
+    container_name: job-agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobagent}
+      POSTGRES_DB: ${POSTGRES_DB:-jobagent}
+    volumes:
+      - ${POSTGRES_DATA_DIR:-/mnt/mainpool/apps/job-agent/postgres}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobagent} -d ${POSTGRES_DB:-jobagent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: job-agent-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - ${REDIS_DATA_DIR:-/mnt/mainpool/apps/job-agent/redis}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
