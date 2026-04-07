@@ -6,16 +6,30 @@ const state = {
   selectedProfileId: null,
   selectedJobIds: new Set(),
   filters: {
-    search: "",
+    titleQuery: "",
+    locationQuery: "",
+    companyQuery: "",
     sourceId: "all",
     availability: "open",
     status: "all",
+  },
+  sort: {
+    key: "updated_at",
+    direction: "desc",
   },
 };
 
 const els = {
   refreshButton: document.getElementById("refreshButton"),
   connectionPill: document.getElementById("connectionPill"),
+  profileForm: document.getElementById("profileForm"),
+  profileNameInput: document.getElementById("profileNameInput"),
+  fullNameInput: document.getElementById("fullNameInput"),
+  emailInput: document.getElementById("emailInput"),
+  phoneInput: document.getElementById("phoneInput"),
+  locationInput: document.getElementById("locationInput"),
+  resumeFileInput: document.getElementById("resumeFileInput"),
+  resumeMarkdownInput: document.getElementById("resumeMarkdownInput"),
   profilesCount: document.getElementById("profilesCount"),
   profileSelect: document.getElementById("profileSelect"),
   profileDetails: document.getElementById("profileDetails"),
@@ -26,7 +40,9 @@ const els = {
   syncAllButton: document.getElementById("syncAllButton"),
   statsGrid: document.getElementById("statsGrid"),
   runList: document.getElementById("runList"),
-  searchInput: document.getElementById("searchInput"),
+  titleSearchInput: document.getElementById("titleSearchInput"),
+  locationSearchInput: document.getElementById("locationSearchInput"),
+  companySearchInput: document.getElementById("companySearchInput"),
   sourceFilter: document.getElementById("sourceFilter"),
   availabilityFilter: document.getElementById("availabilityFilter"),
   statusFilter: document.getElementById("statusFilter"),
@@ -49,6 +65,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 function bindEvents() {
   els.refreshButton.addEventListener("click", () => loadDashboardData());
+  els.profileForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await createProfileFromForm();
+  });
   els.profileSelect.addEventListener("change", async (event) => {
     state.selectedProfileId = event.target.value || null;
     state.selectedJobIds.clear();
@@ -56,8 +76,16 @@ function bindEvents() {
     renderDashboard();
   });
 
-  els.searchInput.addEventListener("input", (event) => {
-    state.filters.search = event.target.value.trim().toLowerCase();
+  els.titleSearchInput.addEventListener("input", (event) => {
+    state.filters.titleQuery = event.target.value.trim().toLowerCase();
+    renderDashboard();
+  });
+  els.locationSearchInput.addEventListener("input", (event) => {
+    state.filters.locationQuery = event.target.value.trim().toLowerCase();
+    renderDashboard();
+  });
+  els.companySearchInput.addEventListener("input", (event) => {
+    state.filters.companyQuery = event.target.value.trim().toLowerCase();
     renderDashboard();
   });
   els.sourceFilter.addEventListener("change", (event) => {
@@ -143,6 +171,19 @@ function bindEvents() {
       setConnectionState("Failed to add source");
     }
   });
+
+  document.querySelectorAll("[data-sort-key]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.sortKey;
+      if (state.sort.key === key) {
+        state.sort.direction = state.sort.direction === "asc" ? "desc" : "asc";
+      } else {
+        state.sort.key = key;
+        state.sort.direction = key === "updated_at" ? "desc" : "asc";
+      }
+      renderDashboard();
+    });
+  });
 }
 
 async function loadDashboardData({ silent = false } = {}) {
@@ -215,6 +256,54 @@ async function queueSelectedJobs(jobIds) {
   }
 }
 
+async function createProfileFromForm() {
+  const profileName = els.profileNameInput.value.trim();
+  if (!profileName) {
+    setBatchMessage("Profile label is required.", "warning");
+    return;
+  }
+
+  const payload = {
+    name: profileName,
+    data: {
+      identity: {
+        full_name: els.fullNameInput.value.trim(),
+        email: els.emailInput.value.trim(),
+        phone: els.phoneInput.value.trim(),
+        location: els.locationInput.value.trim(),
+      },
+    },
+    answers: [],
+  };
+
+  try {
+    setConnectionState("Creating profile…");
+    const createdProfile = await fetchJson("/profiles", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    const resumeFile = els.resumeFileInput.files?.[0];
+    const markdownFile = els.resumeMarkdownInput.files?.[0];
+    if (resumeFile) {
+      const formData = new FormData();
+      formData.append("resume", resumeFile);
+      if (markdownFile) {
+        formData.append("resume_markdown", markdownFile);
+      }
+      await fetchMultipart(`/profiles/${encodeURIComponent(createdProfile.id)}/resume`, formData);
+    }
+
+    els.profileForm.reset();
+    state.selectedProfileId = createdProfile.id;
+    await loadDashboardData();
+    setBatchMessage("Profile created successfully.", "success");
+  } catch (error) {
+    setBatchMessage(getErrorMessage(error), "error");
+    setConnectionState("Profile creation failed");
+  }
+}
+
 async function syncSource(sourceId, { refreshAfter = true } = {}) {
   try {
     setConnectionState("Syncing source…");
@@ -235,6 +324,7 @@ function renderDashboard() {
   renderStats();
   renderRuns();
   renderJobs();
+  renderSortIndicators();
 }
 
 function renderProfilePanel() {
@@ -498,9 +588,20 @@ function renderJobs() {
 
 function getFilteredJobs() {
   const latestRuns = getLatestRunMap();
-  return state.jobs.filter((job) => {
-    const haystack = [job.title, job.company, job.location, job.description].filter(Boolean).join(" ").toLowerCase();
-    if (state.filters.search && !haystack.includes(state.filters.search)) {
+  const filtered = state.jobs.filter((job) => {
+    const titleHaystack = [job.title, job.description].filter(Boolean).join(" ").toLowerCase();
+    const locationHaystack = [job.location].filter(Boolean).join(" ").toLowerCase();
+    const companyHaystack = [job.company].filter(Boolean).join(" ").toLowerCase();
+
+    if (state.filters.titleQuery && !titleHaystack.includes(state.filters.titleQuery)) {
+      return false;
+    }
+
+    if (state.filters.locationQuery && !locationHaystack.includes(state.filters.locationQuery)) {
+      return false;
+    }
+
+    if (state.filters.companyQuery && !companyHaystack.includes(state.filters.companyQuery)) {
       return false;
     }
 
@@ -525,6 +626,7 @@ function getFilteredJobs() {
 
     return true;
   });
+  return sortJobs(filtered, latestRuns);
 }
 
 function getLatestRunMap() {
@@ -557,6 +659,52 @@ function getSourceLabel(job) {
   }
   const source = state.sources.find((entry) => entry.id === job.source_id);
   return source ? source.name : "Imported source";
+}
+
+function sortJobs(jobs, latestRuns) {
+  const direction = state.sort.direction === "asc" ? 1 : -1;
+  return [...jobs].sort((left, right) => {
+    const leftValue = sortValueForJob(left, latestRuns, state.sort.key);
+    const rightValue = sortValueForJob(right, latestRuns, state.sort.key);
+    if (leftValue < rightValue) {
+      return -1 * direction;
+    }
+    if (leftValue > rightValue) {
+      return 1 * direction;
+    }
+    return 0;
+  });
+}
+
+function sortValueForJob(job, latestRuns, key) {
+  if (key === "title") {
+    return String(job.title || job.url || "").toLowerCase();
+  }
+  if (key === "company") {
+    return String(job.company || "").toLowerCase();
+  }
+  if (key === "location") {
+    return String(job.location || "").toLowerCase();
+  }
+  if (key === "status") {
+    return getApplyStatus(job, latestRuns);
+  }
+  if (key === "source") {
+    return getSourceLabel(job).toLowerCase();
+  }
+  if (key === "updated_at") {
+    return new Date(job.updated_at || 0).getTime();
+  }
+  return "";
+}
+
+function renderSortIndicators() {
+  document.querySelectorAll("[data-sort-key]").forEach((button) => {
+    button.classList.remove("sort-asc", "sort-desc");
+    if (button.dataset.sortKey === state.sort.key) {
+      button.classList.add(state.sort.direction === "asc" ? "sort-asc" : "sort-desc");
+    }
+  });
 }
 
 function getActiveProfile() {
@@ -642,6 +790,24 @@ async function fetchJson(url, options = {}) {
   }
   if (response.status === 204) {
     return null;
+  }
+  return response.json();
+}
+
+async function fetchMultipart(url, formData) {
+  const response = await fetch(url, {
+    method: "POST",
+    body: formData,
+  });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const payload = await response.json();
+      detail = payload.detail || JSON.stringify(payload);
+    } catch {
+      detail = await response.text();
+    }
+    throw new Error(detail);
   }
   return response.json();
 }

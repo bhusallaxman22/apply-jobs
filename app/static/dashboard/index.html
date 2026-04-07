@@ -28,6 +28,51 @@
           <section class="panel card">
             <div class="panel-header">
               <div>
+                <p class="panel-kicker">Create</p>
+                <h2>Add Profile</h2>
+              </div>
+            </div>
+            <form id="profileForm" class="profile-form">
+              <label class="field-label" for="profileNameInput">Profile label</label>
+              <input id="profileNameInput" name="profile_name" class="input" type="text" placeholder="Default resume" required />
+
+              <div class="form-grid">
+                <div>
+                  <label class="field-label" for="fullNameInput">Full name</label>
+                  <input id="fullNameInput" name="full_name" class="input" type="text" placeholder="Your full name" />
+                </div>
+                <div>
+                  <label class="field-label" for="emailInput">Email</label>
+                  <input id="emailInput" name="email" class="input" type="email" placeholder="you@example.com" />
+                </div>
+                <div>
+                  <label class="field-label" for="phoneInput">Phone</label>
+                  <input id="phoneInput" name="phone" class="input" type="text" placeholder="+1 555 555 5555" />
+                </div>
+                <div>
+                  <label class="field-label" for="locationInput">Location</label>
+                  <input id="locationInput" name="location" class="input" type="text" placeholder="Euless, TX, USA" />
+                </div>
+              </div>
+
+              <div class="form-grid">
+                <div>
+                  <label class="field-label" for="resumeFileInput">Resume PDF</label>
+                  <input id="resumeFileInput" name="resume" class="input file-input" type="file" accept=".pdf" />
+                </div>
+                <div>
+                  <label class="field-label" for="resumeMarkdownInput">Resume Markdown</label>
+                  <input id="resumeMarkdownInput" name="resume_markdown" class="input file-input" type="file" accept=".md,.txt" />
+                </div>
+              </div>
+
+              <button id="createProfileButton" class="button button-primary" type="submit">Create profile</button>
+            </form>
+          </section>
+
+          <section class="panel card">
+            <div class="panel-header">
+              <div>
                 <p class="panel-kicker">Resume</p>
                 <h2>Active Profile</h2>
               </div>
@@ -88,8 +133,18 @@
           <section class="card toolbar">
             <div class="toolbar-group toolbar-filters">
               <div class="toolbar-field toolbar-search">
-                <label class="field-label" for="searchInput">Search jobs</label>
-                <input id="searchInput" class="input" type="search" placeholder="Title, company, location…" />
+                <label class="field-label" for="titleSearchInput">Job title</label>
+                <input id="titleSearchInput" class="input" type="search" placeholder="Software Engineer, Backend, Intern…" />
+              </div>
+
+              <div class="toolbar-field toolbar-search">
+                <label class="field-label" for="locationSearchInput">Location</label>
+                <input id="locationSearchInput" class="input" type="search" placeholder="Remote, Dallas, Texas…" />
+              </div>
+
+              <div class="toolbar-field toolbar-search">
+                <label class="field-label" for="companySearchInput">Company</label>
+                <input id="companySearchInput" class="input" type="search" placeholder="Search company…" />
               </div>
 
               <div class="toolbar-field">
@@ -146,12 +201,12 @@
                     <th class="checkbox-cell">
                       <input id="selectAllCheckbox" type="checkbox" aria-label="Select visible jobs" />
                     </th>
-                    <th>Role</th>
-                    <th>Company</th>
-                    <th>Location</th>
-                    <th>Status</th>
-                    <th>Source</th>
-                    <th>Updated</th>
+                    <th><button class="sort-button" data-sort-key="title" type="button">Role</button></th>
+                    <th><button class="sort-button" data-sort-key="company" type="button">Company</button></th>
+                    <th><button class="sort-button" data-sort-key="location" type="button">Location</button></th>
+                    <th><button class="sort-button" data-sort-key="status" type="button">Status</button></th>
+                    <th><button class="sort-button" data-sort-key="source" type="button">Source</button></th>
+                    <th><button class="sort-button" data-sort-key="updated_at" type="button">Updated</button></th>
                     <th>Action</th>
                   </tr>
                 </thead>

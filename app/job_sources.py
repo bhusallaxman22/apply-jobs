@@ -227,6 +227,15 @@ def resolve_source_payload(payload: JobSourceCreate) -> tuple[str, str]:
     return platform, token
 
 
+def refresh_source_identity_from_url(source: JobSource) -> None:
+    if not source.source_url:
+        return
+    platform = detect_platform_from_url(source.source_url)
+    token = extract_source_token(platform=platform, source_url=source.source_url, source_token=None)
+    source.platform = platform
+    source.source_token = token
+
+
 async def create_or_get_source(session: Session, payload: JobSourceCreate) -> JobSource:
     platform, token = resolve_source_payload(payload)
     existing = (
@@ -266,6 +275,11 @@ async def create_or_get_source(session: Session, payload: JobSourceCreate) -> Jo
 
 
 async def sync_job_source(session: Session, source: JobSource) -> JobSourceSyncRead:
+    try:
+        refresh_source_identity_from_url(source)
+    except JobSourceError:
+        pass
+
     try:
         resolved_name, imported_jobs = await fetch_jobs_for_source(source)
     except Exception as exc:

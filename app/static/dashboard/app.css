@@ -231,6 +231,21 @@ body {
   gap: 10px;
 }
 
+.profile-form {
+  display: grid;
+  gap: 12px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.file-input {
+  padding: 10px 12px;
+}
+
 .source-list,
 .run-list,
 .profile-details {
@@ -385,6 +400,32 @@ body {
   letter-spacing: 0.12em;
 }
 
+.sort-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.sort-button::after {
+  content: "";
+  margin-left: 6px;
+  opacity: 0.6;
+}
+
+.sort-button.sort-asc::after {
+  content: "↑";
+}
+
+.sort-button.sort-desc::after {
+  content: "↓";
+}
+
 .jobs-table tr:hover td {
   background: rgba(255, 255, 255, 0.42);
 }
@@ -529,5 +570,9 @@ body {
 
   .stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
   }
 }
