@@ -10,7 +10,15 @@ from app.answer_bank import normalize_prompt
 from app.config import get_settings
 from app.db import get_session
 from app.models import AnswerEntry, Profile
-from app.schemas import AnswerEntryCreate, ProfileCreate, ProfileRead, ProfileUpdate
+from app.resume_customizer import create_resume_variant, extract_pdf_text
+from app.schemas import (
+    AnswerEntryCreate,
+    ProfileCreate,
+    ProfileRead,
+    ProfileUpdate,
+    ResumeCustomizeRequest,
+    ResumeVariantRead,
+)
 
 router = APIRouter()
 
@@ -39,6 +47,18 @@ def _serialize_profile(profile: Profile) -> ProfileRead:
         created_at=profile.created_at,
         updated_at=profile.updated_at,
     )
+
+
+def _write_upload(destination: Path, uploaded_file: UploadFile) -> None:
+    destination.write_bytes(uploaded_file.file.read())
+
+
+def _update_profile_documents(profile: Profile, **updates) -> None:
+    updated_data = dict(profile.data or {})
+    documents = dict(updated_data.get("documents", {}))
+    documents.update({key: value for key, value in updates.items() if value is not None})
+    updated_data["documents"] = documents
+    profile.data = updated_data
 
 
 @router.get("", response_model=list[ProfileRead])
@@ -120,6 +140,9 @@ def add_profile_answer(
 def upload_resume(
     profile_id: str,
     resume: UploadFile = File(...),
+    resume_markdown: UploadFile | None = File(None),
+    resume_typst: UploadFile | None = File(None),
+    resume_text: UploadFile | None = File(None),
     session: Session = Depends(get_session),
 ) -> ProfileRead:
     profile = _profile_query(session).filter(Profile.id == profile_id).one_or_none()
@@ -129,15 +152,53 @@ def upload_resume(
     settings = get_settings()
     suffix = Path(resume.filename or "resume.pdf").suffix or ".pdf"
     destination = settings.resumes_path / f"{profile.id}-{uuid4().hex}{suffix}"
-    destination.write_bytes(resume.file.read())
+    _write_upload(destination, resume)
 
     profile.resume_path = str(destination)
-    updated_data = dict(profile.data or {})
-    documents = dict(updated_data.get("documents", {}))
-    documents["resume_pdf"] = str(destination)
-    updated_data["documents"] = documents
-    profile.data = updated_data
+    document_updates: dict[str, str] = {"resume_pdf": str(destination)}
+
+    if resume_markdown is not None:
+        markdown_path = settings.resumes_path / f"{profile.id}-{uuid4().hex}.md"
+        _write_upload(markdown_path, resume_markdown)
+        document_updates["resume_markdown_path"] = str(markdown_path)
+
+    if resume_typst is not None:
+        typst_path = settings.resumes_path / f"{profile.id}-{uuid4().hex}.typ"
+        _write_upload(typst_path, resume_typst)
+        document_updates["resume_typst_path"] = str(typst_path)
+
+    if resume_text is not None:
+        text_path = settings.resumes_path / f"{profile.id}-{uuid4().hex}.txt"
+        _write_upload(text_path, resume_text)
+        document_updates["resume_source_text_path"] = str(text_path)
+    elif "resume_markdown_path" not in document_updates:
+        try:
+            extracted_text = extract_pdf_text(destination)
+        except Exception:
+            extracted_text = ""
+        if extracted_text:
+            text_path = settings.resumes_path / f"{profile.id}-{uuid4().hex}.txt"
+            text_path.write_text(extracted_text, encoding="utf-8")
+            document_updates["resume_source_text_path"] = str(text_path)
+
+    _update_profile_documents(profile, **document_updates)
     session.commit()
     session.refresh(profile)
     profile = _profile_query(session).filter(Profile.id == profile.id).one()
     return _serialize_profile(profile)
+
+
+@router.post("/{profile_id}/resume/customize", response_model=ResumeVariantRead)
+async def customize_resume(
+    profile_id: str,
+    payload: ResumeCustomizeRequest,
+    session: Session = Depends(get_session),
+) -> ResumeVariantRead:
+    profile = _profile_query(session).filter(Profile.id == profile_id).one_or_none()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+    return await create_resume_variant(
+        profile_id=profile.id,
+        profile_data=profile.data,
+        job_request=payload,
+    )

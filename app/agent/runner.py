@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from app.agent.safety import should_stop_for_review
 from app.config import get_settings
 from app.db import session_scope
 from app.models import Job, Profile, Run
+from app.resume_customizer import ResumeCustomizationError, create_resume_variant
+from app.schemas import ResumeCustomizeRequest
 from app.site_adapters import get_adapter
 
 
@@ -85,6 +88,9 @@ async def execute_run(run_id: str) -> None:
         session.flush()
         job_url = job.url
         company = job.company
+        job_title = job.title
+        job_description = job.description
+        profile_id = profile.id
         profile_data = dict(profile.data or {})
         answer_entries = list(profile.answers)
 
@@ -109,6 +115,50 @@ async def execute_run(run_id: str) -> None:
             page_state = await extract_page_state(page)
             platform = detect_platform(page_state)
             adapter = get_adapter(platform)
+            profile_data_for_run = deepcopy(profile_data)
+
+            try:
+                variant = await create_resume_variant(
+                    profile_id=profile_id,
+                    profile_data=profile_data_for_run,
+                    job_request=ResumeCustomizeRequest(
+                        job_url=job_url,
+                        company=company,
+                        job_title=job_title or page_state.title,
+                        job_description=job_description or page_state.visible_text[:6000],
+                    ),
+                )
+                documents = dict(profile_data_for_run.get("documents", {}))
+                documents["resume_pdf"] = variant.pdf_path
+                documents["tailored_resume_markdown_path"] = variant.markdown_path
+                profile_data_for_run["documents"] = documents
+                artifacts["tailored_resume"] = variant.model_dump(mode="json")
+                decisions.append(
+                    {
+                        "action": "generate",
+                        "target": "resume",
+                        "source": "resume_customizer",
+                        "note": f"Generated tailored resume at {variant.pdf_path}",
+                    }
+                )
+            except ResumeCustomizationError as exc:
+                decisions.append(
+                    {
+                        "action": "skip",
+                        "target": "resume",
+                        "source": "resume_customizer",
+                        "note": f"Resume customization skipped: {exc}",
+                    }
+                )
+            except Exception as exc:
+                decisions.append(
+                    {
+                        "action": "skip",
+                        "target": "resume",
+                        "source": "resume_customizer",
+                        "note": f"Tailored resume generation failed, using base resume: {exc}",
+                    }
+                )
 
             with session_scope() as session:
                 run = session.get(Run, run_id)
@@ -116,6 +166,10 @@ async def execute_run(run_id: str) -> None:
                 run.platform = platform
                 job.platform = platform
                 job.status = "running"
+                if not job.title:
+                    job.title = page_state.title
+                if not job.description:
+                    job.description = page_state.visible_text[:8000]
 
             started = await adapter.start_application(page)
             decisions.append(
@@ -130,7 +184,7 @@ async def execute_run(run_id: str) -> None:
             if not started:
                 await _planner_navigate(page, decisions)
 
-            fields, filled, skipped = await adapter.autofill_fields(page, profile_data, answer_entries)
+            fields, filled, skipped = await adapter.autofill_fields(page, profile_data_for_run, answer_entries)
             decisions.extend(filled)
             decisions.extend(skipped)
             extracted_fields = [field.model_dump() for field in fields]
@@ -159,6 +213,7 @@ async def execute_run(run_id: str) -> None:
                     "requires_human_approval": review_required,
                     "final_url": final_page_state.url,
                     "fields": extracted_fields,
+                    "tailored_resume": artifacts.get("tailored_resume"),
                 }
                 run.result = result
                 run.finished_at = utc_now()

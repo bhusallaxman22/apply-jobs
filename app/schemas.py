@@ -42,14 +42,26 @@ class ProfileRead(BaseModel):
 class JobCreate(BaseModel):
     url: str
     company: str | None = None
+    title: str | None = None
+    description: str | None = None
+    location: str | None = None
+    employment_type: str | None = None
 
 
 class JobRead(BaseModel):
     id: str
+    source_id: str | None
+    external_job_id: str | None
     url: str
     company: str | None
+    title: str | None
+    description: str | None
+    location: str | None
+    employment_type: str | None
+    availability: str
     platform: str
     status: str
+    source_metadata: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
@@ -58,6 +70,9 @@ class RunCreate(BaseModel):
     profile_id: str
     job_id: str | None = None
     job_url: str | None = None
+    company: str | None = None
+    job_title: str | None = None
+    job_description: str | None = None
 
     @model_validator(mode="after")
     def validate_job_input(self) -> "RunCreate":
@@ -66,6 +81,42 @@ class RunCreate(BaseModel):
         if self.job_id and self.job_url:
             raise ValueError("Provide job_id or job_url, not both.")
         return self
+
+
+class JobSourceCreate(BaseModel):
+    name: str | None = None
+    source_url: str | None = None
+    platform: str | None = None
+    source_token: str | None = None
+    auto_sync: bool = True
+
+    @model_validator(mode="after")
+    def validate_source_input(self) -> "JobSourceCreate":
+        if not self.source_url and not self.source_token:
+            raise ValueError("Either source_url or source_token must be provided.")
+        if self.platform is None and self.source_url is None:
+            raise ValueError("platform is required when source_url is not provided.")
+        return self
+
+
+class JobSourceRead(BaseModel):
+    id: str
+    name: str
+    source_url: str | None
+    platform: str
+    source_token: str
+    last_sync_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class JobSourceSyncRead(BaseModel):
+    source: JobSourceRead
+    imported: int
+    updated: int
+    closed: int
+    open_jobs: list[JobRead]
 
 
 class RunApproval(BaseModel):
@@ -145,3 +196,60 @@ class AgentDecision(BaseModel):
     source: str
     confidence: float | None = None
     note: str | None = None
+
+
+class ResumeCustomizeRequest(BaseModel):
+    job_url: str | None = None
+    company: str | None = None
+    job_title: str | None = None
+    job_description: str
+
+
+class TailoredSkillCategory(BaseModel):
+    category: str
+    items: list[str] = Field(default_factory=list)
+
+
+class TailoredExperienceEntry(BaseModel):
+    company: str
+    role: str
+    location: str | None = None
+    dates: str | None = None
+    bullets: list[str] = Field(default_factory=list)
+
+
+class TailoredProjectEntry(BaseModel):
+    name: str
+    url: str | None = None
+    bullets: list[str] = Field(default_factory=list)
+    technologies: list[str] = Field(default_factory=list)
+
+
+class TailoredEducationEntry(BaseModel):
+    institution: str
+    degree: str | None = None
+    dates: str | None = None
+    details: list[str] = Field(default_factory=list)
+
+
+class TailoredResumeDocument(BaseModel):
+    summary: str
+    skills: list[TailoredSkillCategory] = Field(default_factory=list)
+    experience: list[TailoredExperienceEntry] = Field(default_factory=list)
+    projects: list[TailoredProjectEntry] = Field(default_factory=list)
+    education: list[TailoredEducationEntry] = Field(default_factory=list)
+    achievements: list[str] = Field(default_factory=list)
+    review_notes: list[str] = Field(default_factory=list)
+
+
+class ResumeVariantRead(BaseModel):
+    profile_id: str
+    job_url: str | None = None
+    company: str | None = None
+    job_title: str | None = None
+    markdown_path: str
+    pdf_path: str
+    source_path: str
+    rendered_markdown: str
+    review_notes: list[str] = Field(default_factory=list)
+    generated_at: datetime

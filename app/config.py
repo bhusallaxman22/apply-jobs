@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     def resumes_path(self) -> Path:
         return self.storage_path / "resumes"
 
+    @property
+    def resume_variants_path(self) -> Path:
+        return self.resumes_path / "variants"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -62,5 +66,6 @@ def ensure_storage_dirs() -> None:
         settings.traces_path,
         settings.html_path,
         settings.resumes_path,
+        settings.resume_variants_path,
     ):
         path.mkdir(parents=True, exist_ok=True)

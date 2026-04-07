@@ -56,14 +56,16 @@ class AnswerEntry(Base):
     profile: Mapped["Profile"] = relationship(back_populates="answers")
 
 
-class Job(Base):
-    __tablename__ = "jobs"
+class JobSource(Base):
+    __tablename__ = "job_sources"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    url: Mapped[str] = mapped_column(Text, nullable=False)
-    company: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    platform: Mapped[str] = mapped_column(String(50), default="unknown", nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="queued", nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_token: Mapped[str] = mapped_column(String(255), nullable=False)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -72,6 +74,34 @@ class Job(Base):
         nullable=False,
     )
 
+    jobs: Mapped[list["Job"]] = relationship(back_populates="source")
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    source_id: Mapped[str | None] = mapped_column(ForeignKey("job_sources.id", ondelete="SET NULL"), nullable=True)
+    external_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    company: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    employment_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    availability: Mapped[str] = mapped_column(String(50), default="open", nullable=False)
+    platform: Mapped[str] = mapped_column(String(50), default="unknown", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="queued", nullable=False)
+    source_metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+    source: Mapped[JobSource | None] = relationship(back_populates="jobs")
     runs: Mapped[list["Run"]] = relationship(back_populates="job", cascade="all, delete-orphan")
 
 

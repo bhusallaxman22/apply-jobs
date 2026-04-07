@@ -60,7 +60,12 @@ def create_run(
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found.")
     else:
-        job = Job(url=payload.job_url)
+        job = Job(
+            url=payload.job_url,
+            company=payload.company,
+            title=payload.job_title,
+            description=payload.job_description,
+        )
         session.add(job)
         session.flush()
 
