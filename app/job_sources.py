@@ -18,6 +18,12 @@ class JobSourceError(RuntimeError):
     pass
 
 
+PUBLIC_SOURCE_HEADERS = {
+    "User-Agent": "apply-jobs/1.0 (+https://github.com/bhusallaxman22/apply-jobs)",
+    "Accept": "application/json, text/plain;q=0.9, */*;q=0.8",
+}
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -40,6 +46,10 @@ def normalize_platform(value: str) -> str:
         return "greenhouse"
     if "lever" in lowered:
         return "lever"
+    if "ashby" in lowered:
+        return "ashby"
+    if "recruitee" in lowered:
+        return "recruitee"
     raise JobSourceError(f"Unsupported job source platform: {value}")
 
 
@@ -50,6 +60,10 @@ def detect_platform_from_url(source_url: str) -> str:
         return "greenhouse"
     if "lever.co" in lowered:
         return "lever"
+    if "ashbyhq.com" in lowered:
+        return "ashby"
+    if lowered.endswith(".recruitee.com") or lowered == "recruitee.com":
+        return "recruitee"
     raise JobSourceError(f"Could not detect source platform from URL: {source_url}")
 
 
@@ -73,6 +87,15 @@ def extract_source_token(*, platform: str, source_url: str | None, source_token:
         if hostname == "api.lever.co" and len(path_parts) >= 3 and path_parts[:2] == ["v0", "postings"]:
             return path_parts[2]
         return path_parts[0]
+    if platform == "ashby":
+        if hostname == "api.ashbyhq.com" and len(path_parts) >= 3 and path_parts[:2] == ["posting-api", "job-board"]:
+            return path_parts[2]
+        return path_parts[0]
+    if platform == "recruitee":
+        hostname_parts = [part for part in hostname.split(".") if part]
+        if len(hostname_parts) >= 3 and hostname_parts[-2:] == ["recruitee", "com"]:
+            return hostname_parts[0]
+        raise JobSourceError(f"Could not determine Recruitee company token from URL: {source_url}")
     raise JobSourceError(f"Unsupported platform for token extraction: {platform}")
 
 
@@ -89,9 +112,26 @@ class ImportedJob:
     source_metadata: dict
 
 
+def _public_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=get_settings().llm_timeout_seconds,
+        headers=PUBLIC_SOURCE_HEADERS,
+        follow_redirects=True,
+    )
+
+
+def humanize_code(value: str | None) -> str | None:
+    if not value:
+        return None
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value)
+    normalized = re.sub(r"[_-]+", " ", spaced)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.title() if normalized else None
+
+
 async def fetch_greenhouse_jobs(source_token: str) -> tuple[str | None, list[ImportedJob]]:
     base_url = f"https://boards-api.greenhouse.io/v1/boards/{source_token}"
-    async with httpx.AsyncClient(timeout=get_settings().llm_timeout_seconds) as client:
+    async with _public_client() as client:
         board_response = await client.get(base_url)
         jobs_response = await client.get(f"{base_url}/jobs", params={"content": "true"})
     board_response.raise_for_status()
@@ -149,7 +189,7 @@ def _lever_description(item: dict) -> str:
 
 async def fetch_lever_jobs(source_token: str) -> tuple[str | None, list[ImportedJob]]:
     url = f"https://api.lever.co/v0/postings/{source_token}"
-    async with httpx.AsyncClient(timeout=get_settings().llm_timeout_seconds) as client:
+    async with _public_client() as client:
         response = await client.get(url, params={"mode": "json"})
     response.raise_for_status()
 
@@ -179,11 +219,133 @@ async def fetch_lever_jobs(source_token: str) -> tuple[str | None, list[Imported
     return source_token, jobs
 
 
+async def fetch_ashby_jobs(source_token: str) -> tuple[str | None, list[ImportedJob]]:
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{source_token}"
+    async with _public_client() as client:
+        response = await client.get(url)
+    response.raise_for_status()
+
+    data = response.json()
+    jobs: list[ImportedJob] = []
+    for item in data.get("jobs", []):
+        if item.get("isListed") is False:
+            continue
+
+        address = item.get("address") or {}
+        postal_address = address.get("postalAddress") or {}
+        metadata = {
+            "department": item.get("department"),
+            "team": item.get("team"),
+            "workplaceType": item.get("workplaceType"),
+            "isRemote": item.get("isRemote"),
+            "secondaryLocations": item.get("secondaryLocations") or [],
+            "publishedAt": item.get("publishedAt"),
+            "applyUrl": item.get("applyUrl"),
+            "addressCountry": postal_address.get("addressCountry"),
+        }
+        location = item.get("location")
+        if not location:
+            secondary_locations = [value for value in item.get("secondaryLocations") or [] if value]
+            if secondary_locations:
+                location = ", ".join(secondary_locations)
+
+        jobs.append(
+            ImportedJob(
+                external_job_id=str(item.get("id")),
+                url=item.get("jobUrl") or item.get("applyUrl"),
+                title=item.get("title") or "Untitled Job",
+                company=None,
+                description=strip_html(item.get("descriptionPlain") or item.get("descriptionHtml")),
+                location=location,
+                employment_type=humanize_code(item.get("employmentType")),
+                platform="ashby",
+                source_metadata=metadata,
+            )
+        )
+    return source_token, jobs
+
+
+def _recruitee_description(item: dict) -> str:
+    parts = [
+        strip_html(item.get("description")),
+        strip_html(item.get("requirements")),
+    ]
+    return "\n\n".join(part for part in parts if part).strip()
+
+
+def _recruitee_location(item: dict) -> str | None:
+    if item.get("location"):
+        return item.get("location")
+    parts = [item.get("city"), item.get("state_name"), item.get("country")]
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if not part:
+            continue
+        normalized = str(part).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        filtered.append(normalized)
+    return ", ".join(filtered) if filtered else None
+
+
+async def fetch_recruitee_jobs(source_token: str) -> tuple[str | None, list[ImportedJob]]:
+    url = f"https://{source_token}.recruitee.com/api/offers"
+    async with _public_client() as client:
+        response = await client.get(url)
+    response.raise_for_status()
+
+    data = response.json()
+    offers = data.get("offers", [])
+    company_name = next((offer.get("company_name") for offer in offers if offer.get("company_name")), source_token)
+    jobs: list[ImportedJob] = []
+    for item in offers:
+        if item.get("status") and item.get("status") != "published":
+            continue
+
+        metadata = {
+            "careers_apply_url": item.get("careers_apply_url"),
+            "department": item.get("department"),
+            "category_code": item.get("category_code"),
+            "experience_code": item.get("experience_code"),
+            "education_code": item.get("education_code"),
+            "salary": item.get("salary"),
+            "remote": item.get("remote"),
+            "hybrid": item.get("hybrid"),
+            "on_site": item.get("on_site"),
+            "open_questions": item.get("open_questions") or [],
+            "locations": item.get("locations") or [],
+            "published_at": item.get("published_at"),
+            "updated_at": item.get("updated_at"),
+        }
+
+        external_job_id = item.get("id") or item.get("guid") or item.get("slug")
+        jobs.append(
+            ImportedJob(
+                external_job_id=str(external_job_id),
+                url=item.get("careers_url") or item.get("careers_apply_url"),
+                title=item.get("title") or item.get("sharing_title") or "Untitled Job",
+                company=item.get("company_name") or company_name,
+                description=_recruitee_description(item),
+                location=_recruitee_location(item),
+                employment_type=humanize_code(item.get("employment_type_code")),
+                platform="recruitee",
+                source_metadata=metadata,
+            )
+        )
+    return company_name, jobs
+
+
 async def fetch_jobs_for_source(source: JobSource) -> tuple[str | None, list[ImportedJob]]:
     if source.platform == "greenhouse":
         return await fetch_greenhouse_jobs(source.source_token)
     if source.platform == "lever":
         return await fetch_lever_jobs(source.source_token)
+    if source.platform == "ashby":
+        return await fetch_ashby_jobs(source.source_token)
+    if source.platform == "recruitee":
+        return await fetch_recruitee_jobs(source.source_token)
     raise JobSourceError(f"Unsupported source platform: {source.platform}")
 
 
